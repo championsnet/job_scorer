@@ -1,0 +1,116 @@
+package cv
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestCleanText(t *testing.T) {
+	reader := &CVReader{}
+	
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{
+			input:    "  Hello   World  \n\n\nTest  ",
+			expected: "Hello   World  \n\nTest",
+		},
+		{
+			input:    "Normal text with\n\n\nmultiple\n\n\nnewlines",
+			expected: "Normal text with\n\nmultiple\n\nnewlines",
+		},
+		{
+			input:    "Text with \x00\x01\x02 control chars",
+			expected: "Text with  control chars",
+		},
+	}
+	
+	for _, test := range tests {
+		result := reader.cleanText(test.input)
+		if result != test.expected {
+			t.Errorf("cleanText(%q) = %q, want %q", test.input, result, test.expected)
+		}
+	}
+}
+
+func TestIsValidText(t *testing.T) {
+	reader := &CVReader{}
+	
+	// Debug test
+	testText := "Marketing and business development experience"
+	result := reader.isValidText(testText)
+	t.Logf("Testing text: %q, result: %t", testText, result)
+	t.Logf("Text length: %d", len(testText))
+	
+	// Debug the keyword matching
+	expectedKeywords := []string{"experience", "education", "skills", "work", "job", "company", "university", "degree", "marketing", "business", "development", "operations", "administration"}
+	lowerText := strings.ToLower(testText)
+	keywordCount := 0
+	for _, keyword := range expectedKeywords {
+		if strings.Contains(lowerText, keyword) {
+			keywordCount++
+			t.Logf("Found keyword: %s", keyword)
+		}
+	}
+	t.Logf("Total keywords found: %d", keywordCount)
+	
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{
+			input:    "This is a valid CV with experience and education mentioned",
+			expected: true,
+		},
+		{
+			input:    "Marketing and business development experience",
+			expected: true,
+		},
+		{
+			input:    "Short text",
+			expected: false,
+		},
+		{
+			input:    "This text is long enough but doesn't contain relevant keywords",
+			expected: false,
+		},
+		{
+			input:    "Garbled text: !:»³ùäýýB\"",
+			expected: false,
+		},
+	}
+	
+	for _, test := range tests {
+		result := reader.isValidText(test.input)
+		if result != test.expected {
+			t.Errorf("isValidText(%q) = %t, want %t", test.input, result, test.expected)
+		}
+	}
+}
+
+func TestGetFallbackCV(t *testing.T) {
+	reader := &CVReader{}
+	cv := reader.getFallbackCV()
+	
+	// Check that fallback CV contains expected sections
+	expectedSections := []string{
+		"Vasiliki Ploumistou",
+		"EDUCATION:",
+		"EXPERIENCE:",
+		"SKILLS:",
+		"CAREER OBJECTIVES:",
+		"PERSONAL:",
+	}
+	
+	for _, section := range expectedSections {
+		if !strings.Contains(cv, section) {
+			t.Errorf("Fallback CV missing expected section: %s", section)
+		}
+	}
+	
+	// Check that it's not empty
+	if len(cv) < 100 {
+		t.Errorf("Fallback CV too short: %d characters", len(cv))
+	}
+} 
