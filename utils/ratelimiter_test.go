@@ -37,7 +37,7 @@ func TestNewRateLimiter(t *testing.T) {
 			}
 			
 			// Verify configuration through GetStats
-			_, max := rl.GetStats()
+			_, max, _, _ := rl.GetStats()
 			if max != tt.maxRequests {
 				t.Errorf("NewRateLimiter() maxRequests = %d, want %d", max, tt.maxRequests)
 			}
@@ -68,7 +68,7 @@ func TestRateLimiterAcquire(t *testing.T) {
 	}
 
 	// Check stats after two requests
-	active, max := rl.GetStats()
+	active, max, _, _ := rl.GetStats()
 	if active != 2 {
 		t.Errorf("GetStats() active = %d, want 2", active)
 	}
@@ -82,7 +82,7 @@ func TestRateLimiterGetStats(t *testing.T) {
 	rl := NewRateLimiter(3, 100*time.Millisecond)
 
 	// Initially should have no active requests
-	active, max := rl.GetStats()
+	active, max, _, _ := rl.GetStats()
 	if active != 0 {
 		t.Errorf("GetStats() initial active = %d, want 0", active)
 	}
@@ -97,7 +97,7 @@ func TestRateLimiterGetStats(t *testing.T) {
 	}
 
 	// Should have 1 active request
-	active, max = rl.GetStats()
+	active, max, _, _ = rl.GetStats()
 	if active != 1 {
 		t.Errorf("GetStats() after one request active = %d, want 1", active)
 	}
@@ -110,7 +110,7 @@ func TestRateLimiterGetStats(t *testing.T) {
 	rl.Acquire()
 
 	// Should have 3 active requests
-	active, max = rl.GetStats()
+	active, max, _, _ = rl.GetStats()
 	if active != 3 {
 		t.Errorf("GetStats() after three requests active = %d, want 3", active)
 	}
@@ -169,7 +169,7 @@ func TestRateLimiterTimeWindow(t *testing.T) {
 	}
 
 	// Check that we have 1 active request
-	active, max := rl.GetStats()
+	active, max, _, _ := rl.GetStats()
 	if active != 1 {
 		t.Errorf("After first request, active = %d, want 1", active)
 	}
@@ -181,7 +181,7 @@ func TestRateLimiterTimeWindow(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	// Now the first request should have expired
-	active, _ = rl.GetStats()
+	active, _, _, _ = rl.GetStats()
 	if active != 0 {
 		t.Errorf("After time window, active = %d, want 0", active)
 	}

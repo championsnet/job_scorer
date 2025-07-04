@@ -3,6 +3,7 @@ package models
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -45,26 +46,18 @@ func ExtractJobID(jobURL string) string {
 	if jobURL == "" {
 		return ""
 	}
-	
-	// Pattern to match LinkedIn job IDs
-	// Example: https://www.linkedin.com/jobs/view/global-category-manager-it-digitalization-at-mettler-toledo-international-inc-4225966954/
-	// The ID is the last number before the query parameters
-	pattern := regexp.MustCompile(`linkedin\.com/jobs/view/.*?-(\d+)`)
-	matches := pattern.FindStringSubmatch(jobURL)
-	
-	if len(matches) > 1 {
-		return matches[1]
+
+	// Strip query parameters and fragments
+	cleanURL := strings.SplitN(jobURL, "?", 2)[0]
+	cleanURL = strings.SplitN(cleanURL, "#", 2)[0]
+
+	// Capture all numeric sequences and return the last one
+	re := regexp.MustCompile(`\d+`)
+	numbers := re.FindAllString(cleanURL, -1)
+	if len(numbers) == 0 {
+		return ""
 	}
-	
-	// Fallback pattern for different URL formats
-	pattern2 := regexp.MustCompile(`/jobs/view/.*?-(\d+)`)
-	matches2 := pattern2.FindStringSubmatch(jobURL)
-	
-	if len(matches2) > 1 {
-		return matches2[1]
-	}
-	
-	return ""
+	return numbers[len(numbers)-1]
 }
 
 func NewJob(position, company, location, date, salary, jobURL, companyLogo, agoTime string) (*Job, error) {

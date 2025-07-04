@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"job-scorer/config"
 	"job-scorer/controller"
@@ -12,6 +14,34 @@ import (
 
 	"github.com/robfig/cron/v3"
 )
+
+// checkStartupFlag checks if the application has already run recently (within 30 minutes)
+func checkStartupFlag(dataDir string) bool {
+	flagFile := filepath.Join(dataDir, "startup_flag.txt")
+	
+	// Check if flag file exists and was created recently
+	if info, err := os.Stat(flagFile); err == nil {
+		// Allow rerun if more than 30 minutes have passed
+		timeSinceLastRun := time.Since(info.ModTime())
+		return timeSinceLastRun < 30*time.Minute
+	}
+	
+	return false
+}
+
+// createStartupFlag creates a flag file to mark that startup processing has run
+func createStartupFlag(dataDir string) error {
+	flagFile := filepath.Join(dataDir, "startup_flag.txt")
+	
+	// Ensure directory exists
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return err
+	}
+	
+	// Create flag file with current timestamp
+	content := fmt.Sprintf("Startup processing completed at %s\n", time.Now().Format(time.RFC3339))
+	return os.WriteFile(flagFile, []byte(content), 0644)
+}
 
 func main() {
 	logger := utils.NewLogger("Main")
@@ -27,7 +57,7 @@ func main() {
 
 	// Validate configuration
 	if err := validateConfig(cfg); err != nil {
-		logger.Error("Configuration validation failed: %v: %v", err)
+		logger.Error("Configuration validation failed: %v", err)
 		os.Exit(1)
 	}
 
@@ -42,10 +72,28 @@ func main() {
 	printApplicationStatus(cfg, controller, logger)
 
 	// Run jobs processing initially if RUN_ON_STARTUP is true
+	// But only if we haven't already run today (to avoid double execution with hot reload)
 	if cfg.App.RunOnStartup {
-		logger.Info("Running initial job processing (RUN_ON_STARTUP=true)")
-		if err := controller.SearchAndFilterJobs(); err != nil {
-			logger.Error("Failed to process jobs: %v", err)
+		// Check if we're in development mode by looking for Air or development indicators
+		isDevMode := os.Getenv("AIR_MAIN_BINARY") != "" || os.Getenv("DEV_MODE") == "true"
+		
+		// Check if we've already run startup processing recently (within 30 minutes)
+		hasRunRecently := checkStartupFlag(cfg.App.DataDir)
+		
+		if isDevMode {
+			logger.Info("Skipping initial job processing in development mode (hot reload detected)")
+		} else if hasRunRecently {
+			logger.Info("Skipping initial job processing (already ran within 30 minutes)")
+		} else {
+			logger.Info("Running initial job processing (RUN_ON_STARTUP=true)")
+			if err := controller.SearchAndFilterJobs(); err != nil {
+				logger.Error("Failed to process jobs: %v", err)
+			} else {
+				// Mark that we've run startup processing today
+				if err := createStartupFlag(cfg.App.DataDir); err != nil {
+					logger.Warning("Failed to create startup flag: %v", err)
+				}
+			}
 		}
 	} else {
 		logger.Info("Skipping initial job processing (RUN_ON_STARTUP=false)")

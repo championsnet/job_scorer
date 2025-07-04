@@ -42,8 +42,9 @@ type AppConfig struct {
 }
 
 type RateLimitConfig struct {
-	MaxRequests int
-	TimeWindow  time.Duration
+	MaxRequests        int           `json:"maxRequests"`
+	TimeWindow         time.Duration `json:"timeWindow"`
+	MaxTokensPerMinute int           `json:"maxTokensPerMinute"` // Groq: 6000 TPM (using 5800 for safety)
 }
 
 func Load() (*Config, error) {
@@ -76,6 +77,7 @@ func Load() (*Config, error) {
 		RateLimit: RateLimitConfig{
 			MaxRequests: getEnvInt("MAX_REQUESTS_PER_MINUTE", 20),
 			TimeWindow:  time.Minute,
+			MaxTokensPerMinute: getEnvInt("MAX_TOKENS_PER_MINUTE", 5000),
 		},
 	}
 

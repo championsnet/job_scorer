@@ -14,6 +14,7 @@ import (
 type CheckpointService struct {
 	checkpointDir string
 	logger        *utils.Logger
+	runFolder     string
 }
 
 func NewCheckpointService(checkpointDir string) (*CheckpointService, error) {
@@ -33,18 +34,32 @@ func NewCheckpointService(checkpointDir string) (*CheckpointService, error) {
 	}, nil
 }
 
+// SetRunFolder sets the folder name for the current run/session
+func (cs *CheckpointService) SetRunFolder(folder string) {
+	cs.runFolder = folder
+}
+
+// GetRunFolder returns the current run/session folder name, or generates one if not set
+func (cs *CheckpointService) GetRunFolder() string {
+	if cs.runFolder != "" {
+		return cs.runFolder
+	}
+	// Default: generate a new one
+	now := time.Now()
+	return now.Format("2006-01-02_15-04-05")
+}
+
 // SaveCheckpoint saves jobs with timestamp and metadata in organized folders
 func (cs *CheckpointService) SaveCheckpoint(jobs []*models.Job, stage string, metadata map[string]interface{}) error {
-	now := time.Now()
-	dateFolder := now.Format("2006-01-02")
-	timestamp := now.Format("15-04-05")
-	
-	// Create date-based folder structure
-	dateDir := filepath.Join(cs.checkpointDir, dateFolder)
-	if err := os.MkdirAll(dateDir, 0755); err != nil {
-		return fmt.Errorf("failed to create date directory %s: %w", dateDir, err)
+	runFolder := cs.GetRunFolder()
+	timestamp := time.Now().Format("15-04-05")
+
+	// Create run-based folder structure
+	runDir := filepath.Join(cs.checkpointDir, runFolder)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		return fmt.Errorf("failed to create run directory %s: %w", runDir, err)
 	}
-	
+
 	// Create checkpoint data
 	checkpoint := struct {
 		Timestamp time.Time              `json:"timestamp"`
@@ -53,7 +68,7 @@ func (cs *CheckpointService) SaveCheckpoint(jobs []*models.Job, stage string, me
 		JobCount  int                    `json:"job_count"`
 		Jobs      []*models.Job          `json:"jobs"`
 	}{
-		Timestamp: now,
+		Timestamp: time.Now(),
 		Stage:     stage,
 		Metadata:  metadata,
 		JobCount:  len(jobs),
@@ -62,7 +77,7 @@ func (cs *CheckpointService) SaveCheckpoint(jobs []*models.Job, stage string, me
 
 	// Create filename with timestamp
 	filename := fmt.Sprintf("checkpoint_%s_%s.json", stage, timestamp)
-	filepath := filepath.Join(dateDir, filename)
+	filepath := filepath.Join(runDir, filename)
 
 	// Marshal with indentation
 	data, err := json.MarshalIndent(checkpoint, "", "  ")
@@ -75,26 +90,25 @@ func (cs *CheckpointService) SaveCheckpoint(jobs []*models.Job, stage string, me
 		return fmt.Errorf("failed to write checkpoint file: %w", err)
 	}
 
-	cs.logger.Info("Saved checkpoint: %s/%s with %d jobs", dateFolder, filename, len(jobs))
+	cs.logger.Info("Saved checkpoint: %s/%s with %d jobs", runFolder, filename, len(jobs))
 	return nil
 }
 
-// SaveDailySnapshot saves a daily summary of all job stages in the date folder
+// SaveDailySnapshot saves a daily summary of all job stages in the run folder
 func (cs *CheckpointService) SaveDailySnapshot(allJobs, promisingJobs, finalJobs []*models.Job) error {
-	now := time.Now()
-	dateFolder := now.Format("2006-01-02")
-	
-	// Create date-based folder structure
-	dateDir := filepath.Join(cs.checkpointDir, dateFolder)
-	if err := os.MkdirAll(dateDir, 0755); err != nil {
-		return fmt.Errorf("failed to create date directory %s: %w", dateDir, err)
+	runFolder := cs.GetRunFolder()
+
+	// Create run-based folder structure
+	runDir := filepath.Join(cs.checkpointDir, runFolder)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		return fmt.Errorf("failed to create run directory %s: %w", runDir, err)
 	}
-	
+
 	snapshot := struct {
-		Date         string       `json:"date"`
-		AllJobs      []*models.Job `json:"all_jobs"`
+		Date         string         `json:"date"`
+		AllJobs      []*models.Job  `json:"all_jobs"`
 		PromisingJobs []*models.Job `json:"promising_jobs"`
-		FinalJobs    []*models.Job `json:"final_jobs"`
+		FinalJobs    []*models.Job  `json:"final_jobs"`
 		Summary      struct {
 			TotalJobs      int `json:"total_jobs"`
 			PromisingCount int `json:"promising_count"`
@@ -102,7 +116,7 @@ func (cs *CheckpointService) SaveDailySnapshot(allJobs, promisingJobs, finalJobs
 			EmailCount     int `json:"email_count"`
 		} `json:"summary"`
 	}{
-		Date:         dateFolder,
+		Date:         runFolder,
 		AllJobs:      allJobs,
 		PromisingJobs: promisingJobs,
 		FinalJobs:    finalJobs,
@@ -112,7 +126,7 @@ func (cs *CheckpointService) SaveDailySnapshot(allJobs, promisingJobs, finalJobs
 	snapshot.Summary.TotalJobs = len(allJobs)
 	snapshot.Summary.PromisingCount = len(promisingJobs)
 	snapshot.Summary.FinalCount = len(finalJobs)
-	
+
 	emailCount := 0
 	for _, job := range finalJobs {
 		if job.ShouldSendEmail {
@@ -123,7 +137,7 @@ func (cs *CheckpointService) SaveDailySnapshot(allJobs, promisingJobs, finalJobs
 
 	// Create filename
 	filename := "daily_snapshot.json"
-	filepath := filepath.Join(dateDir, filename)
+	filepath := filepath.Join(runDir, filename)
 
 	// Marshal with indentation
 	data, err := json.MarshalIndent(snapshot, "", "  ")
@@ -136,8 +150,8 @@ func (cs *CheckpointService) SaveDailySnapshot(allJobs, promisingJobs, finalJobs
 		return fmt.Errorf("failed to write daily snapshot: %w", err)
 	}
 
-	cs.logger.Info("Saved daily snapshot: %s/%s (Total: %d, Promising: %d, Final: %d, Email: %d)", 
-		dateFolder, filename, snapshot.Summary.TotalJobs, snapshot.Summary.PromisingCount, 
+	cs.logger.Info("Saved daily snapshot: %s/%s (Total: %d, Promising: %d, Final: %d, Email: %d)",
+		runFolder, filename, snapshot.Summary.TotalJobs, snapshot.Summary.PromisingCount,
 		snapshot.Summary.FinalCount, snapshot.Summary.EmailCount)
 	return nil
 }

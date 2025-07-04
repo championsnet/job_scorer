@@ -29,8 +29,8 @@ func NewFileLogger(serviceName, logDir string) (*Logger, error) {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	// Create log file with timestamp (date and time)
-	timestamp := time.Now().Format("2006-01-02_15-04")
+	// Create log file with full timestamp including seconds for same-day reruns
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
 	logFile := filepath.Join(logDir, fmt.Sprintf("%s_%s.log", serviceName, timestamp))
 	
 	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
@@ -71,6 +71,11 @@ func (l *Logger) Warning(message string, args ...interface{}) {
 }
 
 func (l *Logger) SetOutput(w io.Writer) {
+	if w == nil {
+		// If writer is nil, default to standard output to avoid panics
+		l.logger.SetOutput(os.Stdout)
+		return
+	}
 	l.logger.SetOutput(w)
 }
 
@@ -98,4 +103,35 @@ func Warn(message string, args ...interface{}) {
 
 func Debug(message string, args ...interface{}) {
 	defaultLogger.Debug(message, args...)
+}
+
+// Pipeline step logging methods for clear visual organization
+func (l *Logger) PipelineStart(stepName string, description string) {
+	l.logger.Print(l.formatMessage("INFO", ""))
+	l.logger.Print(l.formatMessage("INFO", "═══════════════════════════════════════════════════════════"))
+	l.logger.Print(l.formatMessage("INFO", "🚀 PIPELINE STEP: %s", stepName))
+	l.logger.Print(l.formatMessage("INFO", "   %s", description))
+	l.logger.Print(l.formatMessage("INFO", "═══════════════════════════════════════════════════════════"))
+}
+
+func (l *Logger) PipelineResult(stepName string, input, output int, details string) {
+	l.logger.Print(l.formatMessage("INFO", "📊 %s RESULT: %d → %d jobs %s", stepName, input, output, details))
+	l.logger.Print(l.formatMessage("INFO", "───────────────────────────────────────────────────────────"))
+}
+
+func (l *Logger) JobDetail(format string, args ...interface{}) {
+	l.logger.Print(l.formatMessage("DEBUG", "   🔍 "+format, args...))
+}
+
+func (l *Logger) Progress(current, total int, format string, args ...interface{}) {
+	message := fmt.Sprintf("[%d/%d] "+format, append([]interface{}{current, total}, args...)...)
+	l.logger.Print(l.formatMessage("INFO", "⏳ %s", message))
+}
+
+func (l *Logger) Success(format string, args ...interface{}) {
+	l.logger.Print(l.formatMessage("INFO", "✅ "+format, args...))
+}
+
+func (l *Logger) Skip(format string, args ...interface{}) {
+	l.logger.Print(l.formatMessage("INFO", "⏭️  "+format, args...))
 } 

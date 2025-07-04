@@ -268,12 +268,17 @@ func TestExtractJobID(t *testing.T) {
 		{
 			name:     "Non-LinkedIn URL",
 			jobURL:   "https://indeed.com/jobs/12345",
-			expected: "",
+			expected: "12345",
 		},
 		{
 			name:     "URL without job ID",
 			jobURL:   "https://www.linkedin.com/jobs/view/software-engineer-at-google-inc/",
 			expected: "",
+		},
+		{
+			name:     "LinkedIn job URL without query parameters",
+			jobURL:   "https://www.linkedin.com/jobs/view/software-engineer-at-google-80-100-inc-1234567890/",
+			expected: "1234567890",
 		},
 	}
 

@@ -33,7 +33,31 @@ func (e *EmailNotifier) SendJobNotification(jobs []*models.Job) error {
 		return nil
 	}
 
-	e.logger.Info("Preparing to send notification for %d jobs to %d recipients", len(jobs), len(e.config.ToRecipients))
+	// Final deduplication check before sending
+	var uniqueJobs []*models.Job
+	seenJobIDs := make(map[string]bool)
+	var duplicateCount int
+
+	for _, job := range jobs {
+		if job.JobID != "" && seenJobIDs[job.JobID] {
+			duplicateCount++
+			e.logger.Warning("⚠️ Found duplicate job in notification batch: %s at %s (ID: %s)", 
+				job.Position, job.Company, job.JobID)
+			continue
+		}
+		if job.JobID != "" {
+			seenJobIDs[job.JobID] = true
+		}
+		uniqueJobs = append(uniqueJobs, job)
+	}
+
+	if duplicateCount > 0 {
+		e.logger.Warning("⚠️ Removed %d duplicate jobs from notification batch", duplicateCount)
+		jobs = uniqueJobs
+	}
+
+	e.logger.Info("Preparing to send notification for %d unique jobs to %d recipients", 
+		len(jobs), len(e.config.ToRecipients))
 
 	// Verify SMTP connection first
 	if err := e.verifySMTPConnection(); err != nil {

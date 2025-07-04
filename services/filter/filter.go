@@ -12,6 +12,7 @@ import (
 
 type Filter struct {
 	unwantedLocations []string
+	unwantedWordsInTitle []string
 	logger            *utils.Logger
 	languageDetector  lingua.LanguageDetector
 }
@@ -19,6 +20,10 @@ type Filter struct {
 func NewFilter(logger *utils.Logger) *Filter {
 	unwantedLocations := []string{
 		"EMEA", "DACH", "Switzerland (Remote)", "Europe", "EU",
+	}
+
+	unwantedWordsInTitle := []string{
+		"Head", "Senior", "Director", "Sr.",
 	}
 
 	// Initialize language detector for German, English, and French
@@ -34,26 +39,21 @@ func NewFilter(logger *utils.Logger) *Filter {
 
 	return &Filter{
 		unwantedLocations: unwantedLocations,
+		unwantedWordsInTitle: unwantedWordsInTitle,
 		logger:            logger,
 		languageDetector:  detector,
 	}
 }
 
 func (f *Filter) PrefilterJobs(jobs []*models.Job) []*models.Job {
-	f.logger.Info("Prefiltering %d jobs", len(jobs))
-	
 	var filteredJobs []*models.Job
 	
 	for _, job := range jobs {
 		if f.shouldIncludeJob(job) {
 			filteredJobs = append(filteredJobs, job)
-		} else {
-			f.logger.Debug("Filtered out job: %s at %s (reason: German content or unwanted location)", 
-				job.Position, job.Company)
 		}
 	}
 	
-	f.logger.Info("After prefiltering: %d jobs remaining", len(filteredJobs))
 	return filteredJobs
 }
 
@@ -64,10 +64,16 @@ func (f *Filter) shouldIncludeJob(job *models.Job) bool {
 			return false
 		}
 	}
+
+	// Check for unwanted words in title
+	for _, unwantedWord := range f.unwantedWordsInTitle {
+		if strings.Contains(strings.ToLower(job.Position), strings.ToLower(unwantedWord)) {
+			return false
+		}
+	}
 	
 	// Check if job title is in German
 	if !f.isEnglishText(job.Position) {
-		f.logger.Debug("Filtered out non-English job title: %s", job.Position)
 		return false
 	}
 	
@@ -87,23 +93,14 @@ func (f *Filter) isEnglishText(text string) bool {
 	// Use confidence values instead of strict detection
 	confidenceValues := f.languageDetector.ComputeLanguageConfidenceValues(cleanedText)
 	
-	// Log confidence values for debugging
-	f.logger.Debug("Language confidence values for text: %s", cleanedText[:min(50, len(cleanedText))])
-	for _, conf := range confidenceValues {
-		f.logger.Debug("  %s: %.2f", conf.Language(), conf.Value())
-	}
-	
 	// Check if English confidence is above threshold (20%)
 	englishThreshold := 0.2 // 20%
 	for _, conf := range confidenceValues {
 		if conf.Language() == lingua.English && conf.Value() >= englishThreshold {
-			f.logger.Debug("Text accepted as English with confidence %.2f", conf.Value())
 			return true
 		}
 	}
 	
-	// If we get here, English confidence was below threshold
-	f.logger.Debug("Text rejected: English confidence below threshold")
 	return false
 }
 
@@ -130,14 +127,32 @@ func (f *Filter) FilterPromisingJobs(jobs []*models.Job, threshold float64) []*m
 
 func (f *Filter) FilterNotificationJobs(jobs []*models.Job) []*models.Job {
 	var notificationJobs []*models.Job
+	seenJobIDs := make(map[string]bool) // Track jobs we've already seen
+	var duplicateCount int
 	
 	for _, job := range jobs {
 		if job.ShouldNotify() {
+			// Skip if we've already seen this job ID
+			if job.JobID != "" && seenJobIDs[job.JobID] {
+				duplicateCount++
+				f.logger.Debug("⚠️ Skipping duplicate job in notifications: %s at %s (ID: %s)", 
+					job.Position, job.Company, job.JobID)
+				continue
+			}
+			
+			// Mark this job ID as seen and add to notifications
+			if job.JobID != "" {
+				seenJobIDs[job.JobID] = true
+			}
 			notificationJobs = append(notificationJobs, job)
 		}
 	}
 	
-	f.logger.Info("Found %d jobs that should trigger notifications", len(notificationJobs))
+	if duplicateCount > 0 {
+		f.logger.Warning("⚠️ Removed %d duplicate jobs from notifications", duplicateCount)
+	}
+	
+	f.logger.Info("Found %d unique jobs that should trigger notifications", len(notificationJobs))
 	return notificationJobs
 }
 

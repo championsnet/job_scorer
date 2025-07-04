@@ -150,74 +150,151 @@ func (e *Evaluator) EvaluateJobWithCV(job *models.Job) (*models.Job, error) {
 }
 
 func (e *Evaluator) getInitialPrompt(job *models.Job) string {
-  // System prompt
-  system := `
-You are an AI Career Advisor that rates jobs for an entry-level marketing/BD/ops/admin candidate.
-Always reply with JSON following this schema:
+  system := `You are an expert AI Career Advisor specializing in entry-level job matching for EU candidates in Switzerland.
+
+CRITICAL: Respond with ONLY valid JSON in this exact format:
 {
   "score": int,         // 0 (worst) to 10 (best)
   "recommend": bool,    // true if candidate should apply
-  "reasons": [string]   // list of 1–3 brief rationale bullets
-}`
-  // User prompt
-  user := fmt.Sprintf(`
-CandidateProfile:
-  - Citizenship: EU (Greek)
-  - Location: commutable to Basel or Zurich, CH
-  - Skills: Marketing, BusinessDev, Operations, Admin
-  - Level: Junior/Intern/Entry
-  - Language: English only (German low)
-  - Priority: Growth & Stability > Salary
+  "reasons": [string]   // list of 1-2 specific rationale bullets
+}
 
-Job:
-  Title: %s
-  Company: %s
-  Location: %s
+EVALUATION CRITERIA (in order of importance):
+   
+1. FIELD FIT (CRITICAL):
+   - GOOD FITS: Marketing, Business Development, Operations, Administrative, Customer Success, Generalist, Strategy, HR
+   - BAD FITS: Software Engineering, Data Science, Finance, Legal, Medical
+   - If technical role (engineer, developer, scientist) → Score = 0-3
+   
+2. SENIORITY LEVEL (HIGH):
+   - PERFECT: Entry-level, junior, intern, graduate, trainee, assistant
+   - ACCEPTABLE: "up to 2 years", "0-3 years experience", "manager"
+   - BAD: Senior, Lead, Director, "5+ years", "experienced"
 
-Criteria:
-  1. language (critical): English role?
-  2. fieldFit (critical): Marketing/BD/Ops/Admin?
-  3. location (high): Basel/Zurich/commutable?
-  4. company (medium): Stable corp/SME?
-`, job.Position, job.Company, job.Location)
+SCORING GUIDE:
+- 9-10: Perfect match (right field, entry-level, good location)
+- 7-8: Good match (minor issues)
+- 5-6: Acceptable (some concerns)
+- 3-4: Poor match (major issues)
+- 0-2: Bad match (wrong field, senior role)`
+  
+  user := fmt.Sprintf(`CANDIDATE PROFILE:
+- Citizenship: EU (Greek passport)
+- Target Locations: Basel, Zurich, remote, commutable
+- Skills: Marketing, Business Development, Operations, Administrative work, Generalist, Strategy, HR
+- Experience Level: Entry-level/Junior (0-2 years)
+
+JOB TO EVALUATE:
+- Title: %s
+- Company: %s
+- Location: %s
+
+ANALYZE THIS JOB POSTING CAREFULLY:
+1. Determine if the role fits marketing/BD/ops/admin/generalist/strategy/HR fields
+2. Assess if location is suitable for Basel/Zurich area or remote/commutable
+3. Evaluate if it's appropriate for entry-level candidate
+
+RESPOND WITH JSON ONLY.`, job.Position, job.Company, job.Location)
 
   return system + "\n\n" + user
 }
 
 func (e *Evaluator) getFinalPrompt(job *models.Job, jobDesc, cv string) string {
-  system := `
-You are an AI Career Advisor performing a **CV vs Job** match.
-Output only valid JSON:
+  system := `You are an expert AI Career Advisor performing a detailed CV vs Job match analysis.
+
+CRITICAL: Respond with ONLY valid JSON in this exact format:
 {
-  "finalScore": int,	// 0 (worst) to 10 (best)
-  "shouldApply": bool,	// true if candidate should apply
-  "reasons": [string]	// list of 1–3 brief rationale bullets
-}`
-  user := fmt.Sprintf(`
-CandidateCV:
+  "finalScore": int,    // 0 (worst) to 10 (best)
+  "shouldApply": bool,  // true if candidate should apply (score > 5)
+  "reasons": [string]   // list of 1–3 specific rationale bullets
+}
+
+CV MATCHING CRITERIA (in order of importance):
+
+1. LANGUAGE REQUIREMENT (CRITICAL - Score 0 if German required):
+   - Scan job description for German language fluency requirements (or any other non-english language requirements)
+   - RED FLAGS: "German required", "Deutsch erforderlich", "DACH", "German native", "Fluent German", "{non-english language} required"
+   - If German required → finalScore = 0, shouldApply = false
+   
+2. SKILL MATCH (CRITICAL):
+   - Look for specific skills in CV that match job requirements
+   - Marketing skills: digital marketing, content creation, social media
+   - Business Development: sales, partnerships, client relations, growth
+   - Operations: project management, process improvement, coordination
+   - Administrative: office management, data entry, executive support, contract management, logistics
+   - Strategy: business strategy, market research, competitive analysis, business development, business planning
+   - Business Support: business support, business operations, business administration, business management, business development, business planning, communications
+   
+3. EXPERIENCE LEVEL (HIGH):
+   - CV shows 0-2 years experience → Perfect for entry-level roles
+   - If job requires 3+ years → Score -2
+   - If job requires 5+ years → Score -5
+   
+4. LOCATION & PERMIT (HIGH):
+   - EU citizen can work in Switzerland
+   - Basel/Zurich area or remote work
+   - If location is far → Score -2
+   
+5. CAREER GROWTH POTENTIAL (MEDIUM):
+   - Learning opportunities, mentorship, career progression
+   - If role is dead-end → Score -1
+   
+6. COMPANY REPUTATION (MEDIUM):
+   - Established vs startup/unknown company
+   - Industry reputation and stability
+
+SCORING GUIDE:
+- 9-10: Perfect CV match (skills align, right level, good location)
+- 7-8: Good CV match (minor skill gaps)
+- 5-6: Acceptable CV match (some skill gaps)
+- 3-4: Poor CV match (major skill gaps)
+- 0-2: Bad CV match (German/Non-english language required, wrong skills, senior role)
+
+IMPORTANT: If job description contains German language requirements, immediately return finalScore=0 and shouldApply=false.`
+
+  // Clean and truncate CV for better processing
+  cleanCV := cleanCVForPrompt(cv)
+  
+  user := fmt.Sprintf(`CANDIDATE CV:
 %s
 
-Job:
-  Title: %s
-  Company: %s
-  Location: %s
-  Description: |
-%s
+JOB DETAILS:
+- Title: %s
+- Company: %s
+- Location: %s
+- Description: %s
 
-FinalCriteria:
-  1. cvMatch (critical)
-  2. careerGrowth (high)
-  3. permit & location (high): commutable to Basel or Zurich, CH
-  4. languageReq (critical): must be English, no German
-  5. companyRep (medium)
-  6. seniority (medium): no senior roles
-  7. experience (medium): up to 3 years of experience required
+PERFORM DETAILED CV ANALYSIS:
+1. Check for German language and any other non-english language requirements in job description
+2. Compare CV skills with job requirements
+3. Assess experience level compatibility
+4. Evaluate location and permit requirements
+5. Consider career growth potential
+6. Analyze company fit
 
-IMPORTANT:
-- If jobDesc is non-English → return finalScore=0.
-`, cv, job.Position, job.Company, job.Location, jobDesc)
+RESPOND WITH JSON ONLY.`, cleanCV, job.Position, job.Company, job.Location, jobDesc)
 
   return system + "\n\n" + user
+}
+
+// Helper function to clean CV text
+func cleanCVForPrompt(cv string) string {
+	// Remove excessive whitespace
+	cv = strings.Join(strings.Fields(cv), " ")
+	
+	// Truncate if too long (keep most relevant parts)
+	if len(cv) > 2000 {
+		// Keep first 1500 chars and last 500 chars
+		cv = cv[:1500] + "\n\n[CV truncated for length]...\n\n" + cv[len(cv)-500:]
+	}
+	
+	// Remove any markdown or formatting that might confuse the LLM
+	cv = strings.ReplaceAll(cv, "**", "")
+	cv = strings.ReplaceAll(cv, "*", "")
+	cv = strings.ReplaceAll(cv, "##", "")
+	cv = strings.ReplaceAll(cv, "#", "")
+	
+	return cv
 }
 
 func (e *Evaluator) cleanResponse(response string) string {
@@ -469,4 +546,60 @@ func (e *Evaluator) parseFinalEvaluationResponse(response string) (*float64, boo
 	e.logger.Debug("Parsed - Final Score: %v, Should Send Email: %t, Reason: %s, Reasons: %v", 
 		finalScore, shouldSendEmail, finalReason, finalReasons)
 	return finalScore, shouldSendEmail, finalReason, finalReasons
+}
+
+// ValidateFinalEvaluation runs a second LLM check to confirm the final evaluation is justified
+func (e *Evaluator) ValidateFinalEvaluation(job *models.Job) (bool, string, error) {
+	if job.FinalScore == nil {
+		return false, "No final score to validate", nil
+	}
+	prompt := e.getValidationPrompt(job)
+	response, err := e.groqClient.ChatCompletion(prompt, 256)
+	if err != nil {
+		return false, "LLM validation error", err
+	}
+	type ValidationResult struct {
+		Valid  bool   `json:"valid"`
+		Reason string `json:"reason"`
+	}
+	var result ValidationResult
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
+		return false, "Failed to parse LLM validation", err
+	}
+	return result.Valid, result.Reason, nil
+}
+
+func (e *Evaluator) getValidationPrompt(job *models.Job) string {
+	cvText, _ := e.cvReader.GetCV()
+	finalScore := 0.0
+	if job.FinalScore != nil {
+		finalScore = *job.FinalScore
+	}
+	shouldApply := job.ShouldSendEmail
+	finalReasons := job.FinalReasons
+	if len(finalReasons) == 0 && job.FinalReason != "" {
+		finalReasons = []string{job.FinalReason}
+	}
+	return fmt.Sprintf(`
+You are a critical reviewer for an AI job-matching system. Your task is to validate the following job recommendation for accuracy and relevance.
+
+CANDIDATE CV:
+%s
+
+JOB DESCRIPTION:
+%s
+
+PREVIOUS AI EVALUATION:
+{
+  "finalScore": %.1f,
+  "shouldApply": %t,
+  "reasons": %q
+}
+
+INSTRUCTIONS:
+- Double-check if the finalScore and shouldApply are justified.
+- If the job is not a good fit (wrong field, seniority, language, or skill mismatch), set "valid" to false.
+- If the recommendation is correct, set "valid" to true.
+- Respond with ONLY valid JSON: { "valid": true/false, "reason": "..." }
+`, cvText, job.JobDescription, finalScore, shouldApply, finalReasons)
 } 

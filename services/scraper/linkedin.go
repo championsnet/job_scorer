@@ -215,7 +215,7 @@ func (s *LinkedInScraper) Query(options QueryOptions) ([]*models.Job, error) {
 		start += batchSize
 
 		// Add delay between requests (2-5 seconds)
-		delay := time.Duration(2000+rand.Intn(3000)) * time.Millisecond
+		delay := time.Duration(1000+rand.Intn(2000)) * time.Millisecond
 		s.logger.Info("Waiting %v before next batch...", delay)
 		time.Sleep(delay)
 	}
@@ -670,6 +670,7 @@ func (s *LinkedInScraper) getRandomUserAgent() string {
 func (s *LinkedInScraper) getDateSincePosted(dateSince string) string {
 	dateRange := map[string]string{
 		"past hour":     "r3600",
+		"past 2 hours":  "r7200",
 		"past month":    "r2592000",
 		"past week":     "r604800",
 		"past 24 hours": "r86400",
