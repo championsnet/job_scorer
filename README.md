@@ -1,15 +1,15 @@
 # Job Scorer - Go Edition
 
-An intelligent job search and evaluation system written in Go that finds promising jobs in Basel and Zurich areas, evaluates them against your CV using AI, and sends email notifications for the best matches.
+An intelligent job search and evaluation system written in Go that finds promising jobs, evaluates them against your CV using AI, and sends email notifications for the best matches.
 
 ## 🚀 Features
 
 - 🔍 **Automated Job Search**: Searches LinkedIn for jobs in Basel and Zurich every hour
-- 🤖 **AI-Powered Initial Screening**: Uses Groq LLM to evaluate job titles and basic criteria
+- 🤖 **AI-Powered Initial Screening**: Uses GPT models to evaluate job titles and basic criteria
 - 📄 **CV Matching**: Fetches full job descriptions and compares them against your CV
 - 📧 **Smart Email Notifications**: Only sends emails for jobs that pass both screenings
 - ⚡ **Concurrent Processing**: Efficient Go-based concurrent evaluation of multiple jobs
-- 🎯 **Customized Criteria**: Tailored for EU citizens with L permits seeking career growth
+- 🎯 **Policy Driven**: Prompts, thresholds, filters, language rules, and email text are configurable in JSON
 - 🚦 **Rate Limiting**: Intelligent rate limiting to respect API limits
 - 📊 **Structured Logging**: Comprehensive logging with different log levels
 - 🗂️ **Clean Architecture**: Well-organized codebase with clear separation of concerns
@@ -37,7 +37,7 @@ job-scorer/
 ## 📋 Prerequisites
 
 - Go 1.21 or higher
-- Groq API key for LLM access
+- OpenAI API key for LLM access
 - SMTP credentials for email notifications
 - Your CV in PDF format
 
@@ -51,16 +51,18 @@ go mod download
 go build -o job-scorer
 ```
 
-2. **Create configuration file:**
+2. **Create configuration files:**
 ```bash
 cp env.example .env
+cp config/config.example.json config/config.json
 ```
 
 3. **Configure your environment variables in `.env`:**
 ```env
-# Groq API Configuration
-GROQ_API_KEY=your_groq_api_key_here
-GROQ_MODEL=gemma2-9b-it
+# OpenAI API Configuration
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_MODEL=gpt-5.2
+POLICY_CONFIG_PATH=config/config.json
 
 # SMTP Configuration
 SMTP_HOST=smtp.your-provider.com
@@ -73,15 +75,22 @@ SMTP_TO=recipient@domain.com
 
 # Application Configuration
 JOB_LOCATIONS=90009885,90009888
-CRON_SCHEDULE=0 */1 * * *
 RUN_ON_STARTUP=true
-CV_PATH=CV_Vasiliki Ploumistou_22_05.pdf
 
 # Rate Limiting
 MAX_REQUESTS_PER_MINUTE=30
 ```
 
-4. **Place your CV file in the root directory**
+4. **Configure CV path in `config/config.json`**
+```json
+{
+  "cv": {
+    "path": "your_cv.pdf"
+  }
+}
+```
+
+5. **Place your CV file in the referenced location**
 
 ## 🏃‍♂️ Usage
 
@@ -117,22 +126,34 @@ Edit the `JOB_LOCATIONS` environment variable:
 JOB_LOCATIONS=90009885,90009888  # Basel, Zurich location IDs
 ```
 
-### Evaluation Criteria
+### Policy Configuration
 
-The system evaluates jobs based on:
-- **Field Match**: Marketing, business development, operations, administration
-- **Location**: Basel preferred, Zurich acceptable
-- **Language**: English required, German >B1 is a blocker
-- **Experience Level**: Entry to mid-level preferred
-- **CV Match**: Skills, education, and experience alignment
+All business-policy behavior is now in `config/config.json`, including:
+- title/location/language filters and keyword lists
+- LLM prompts and per-stage token budgets
+- pipeline thresholds, batch sizes, and final validation rules
+- CV parser order and fallback profile text
+- email subject/body strings and notification gate rules
+- scraper retries/backoff/pagination/delay constants
 
 ### Scheduling
 
-Modify the cron schedule:
-```env
-CRON_SCHEDULE=0 */1 * * *  # Every hour
-# CRON_SCHEDULE=0 9 * * *   # Every day at 9 AM
-# CRON_SCHEDULE=0 9 * * 1   # Every Monday at 9 AM
+Modify the schedule in `config/config.json`:
+```json
+{
+  "app": {
+    "cronSchedule": "0 */1 * * *"
+  }
+}
+```
+
+Set the scraping window in `config/config.json`:
+```json
+{
+  "scraper": {
+    "dateSincePosted": "past hour"
+  }
+}
 ```
 
 ## 📁 Output Files
@@ -179,7 +200,7 @@ golangci-lint run
 1. **CV Loading Errors**: Ensure PDF file exists and is readable
 2. **LinkedIn Blocking**: Randomized headers and delays prevent rate limiting
 3. **Email Failures**: Verify SMTP credentials and connection
-4. **API Errors**: Check Groq API key and rate limits
+4. **API Errors**: Check OpenAI API key and rate limits
 
 ### Debug Logging
 
@@ -198,19 +219,13 @@ The application includes intelligent rate limiting:
 
 ## 🎨 Customization
 
-### Adding New Evaluation Criteria
-
-Edit the prompts in:
-- `services/evaluator/evaluator.go`: Initial screening criteria
-- `services/evaluator/evaluator.go`: CV matching criteria
-
 ### Adding New Job Sources
 
 Implement the scraper interface in `services/scraper/` to add new job sources.
 
 ### Changing Email Templates
 
-Modify the HTML template in `services/notification/email.go`.
+Edit the `notification` block in `config/config.json`.
 
 ## 🔒 Security & Legal
 

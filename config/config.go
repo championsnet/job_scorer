@@ -10,16 +10,19 @@ import (
 )
 
 type Config struct {
-	Groq      GroqConfig
-	SMTP      SMTPConfig
-	App       AppConfig
-	RateLimit RateLimitConfig
-	GCS       GCSConfig
+	OpenAI     OpenAIConfig
+	SMTP       SMTPConfig
+	App        AppConfig
+	RateLimit  RateLimitConfig
+	GCS        GCSConfig
+	PolicyPath string
+	Policy     Policy
 }
 
-type GroqConfig struct {
-	APIKey string
-	Model  string
+type OpenAIConfig struct {
+	APIKey  string
+	Model   string
+	BaseURL string
 }
 
 type SMTPConfig struct {
@@ -46,24 +49,47 @@ type AppConfig struct {
 type RateLimitConfig struct {
 	MaxRequests        int           `json:"maxRequests"`
 	TimeWindow         time.Duration `json:"timeWindow"`
-	MaxTokensPerMinute int           `json:"maxTokensPerMinute"` // Groq: 6000 TPM (using 5800 for safety)
+	MaxTokensPerMinute int           `json:"maxTokensPerMinute"`
 }
 
 type GCSConfig struct {
-	BucketName    string `json:"bucketName"`
-	ProjectID     string `json:"projectId"`
-	Enabled       bool   `json:"enabled"`
-	FallbackDir   string `json:"fallbackDir"`
+	BucketName  string `json:"bucketName"`
+	ProjectID   string `json:"projectId"`
+	Enabled     bool   `json:"enabled"`
+	FallbackDir string `json:"fallbackDir"`
 }
 
 func Load() (*Config, error) {
 	// Load .env file if it exists
 	godotenv.Load()
 
+	policyPath := getEnv("POLICY_CONFIG_PATH", "config/config.json")
+	policy, err := loadPolicy(policyPath)
+	if err != nil {
+		return nil, err
+	}
+	cronSchedule := strings.TrimSpace(policy.App.CronSchedule)
+	// Backward compatibility: allow .env override when explicitly set.
+	if envCron := strings.TrimSpace(os.Getenv("CRON_SCHEDULE")); envCron != "" {
+		cronSchedule = envCron
+	}
+	if cronSchedule == "" {
+		cronSchedule = "0 */1 * * *"
+	}
+	cvPath := strings.TrimSpace(policy.CV.Path)
+	// Backward compatibility: allow .env override when explicitly set.
+	if envCVPath := strings.TrimSpace(os.Getenv("CV_PATH")); envCVPath != "" {
+		cvPath = envCVPath
+	}
+	if cvPath == "" {
+		cvPath = "CV_Vasiliki Ploumistou_22_05.pdf"
+	}
+
 	config := &Config{
-		Groq: GroqConfig{
-			APIKey: getEnv("GROQ_API_KEY", ""),
-			Model:  getEnv("GROQ_MODEL", "gemma2-9b-it"),
+		OpenAI: OpenAIConfig{
+			APIKey:  getEnv("OPENAI_API_KEY", getEnv("GROQ_API_KEY", "")),
+			Model:   getEnv("OPENAI_MODEL", getEnv("GROQ_MODEL", "gpt-5.2")),
+			BaseURL: getEnv("OPENAI_BASE_URL", "https://api.openai.com/v1/chat/completions"),
 		},
 		SMTP: SMTPConfig{
 			Host:         getEnv("SMTP_HOST", ""),
@@ -76,17 +102,17 @@ func Load() (*Config, error) {
 		},
 		App: AppConfig{
 			Locations:             strings.Split(getEnv("JOB_LOCATIONS", "90009885,90009888"), ","),
-			CronSchedule:          getEnv("CRON_SCHEDULE", "0 */1 * * *"),
+			CronSchedule:          cronSchedule,
 			RunOnStartup:          getEnvBool("RUN_ON_STARTUP", true),
-			CVPath:                getEnv("CV_PATH", "CV_Vasiliki Ploumistou_22_05.pdf"),
+			CVPath:                cvPath,
 			DataDir:               getEnv("DATA_DIR", "data"),
 			OutputDir:             getEnv("OUTPUT_DIR", "."),
 			MaxJobs:               getEnvInt("MAX_JOBS_PER_LOCATION", 1000),
-			EnableFinalValidation: getEnvBool("ENABLE_FINAL_VALIDATION", true),
+			EnableFinalValidation: policy.Pipeline.EnableFinalValidation,
 		},
 		RateLimit: RateLimitConfig{
-			MaxRequests: getEnvInt("MAX_REQUESTS_PER_MINUTE", 20),
-			TimeWindow:  time.Minute,
+			MaxRequests:        getEnvInt("MAX_REQUESTS_PER_MINUTE", 20),
+			TimeWindow:         time.Minute,
 			MaxTokensPerMinute: getEnvInt("MAX_TOKENS_PER_MINUTE", 5000),
 		},
 		GCS: GCSConfig{
@@ -95,6 +121,8 @@ func Load() (*Config, error) {
 			Enabled:     getEnvBool("GCS_ENABLED", false),
 			FallbackDir: getEnv("GCS_FALLBACK_DIR", "gcs_fallback"),
 		},
+		PolicyPath: policyPath,
+		Policy:     policy,
 	}
 
 	return config, nil
@@ -123,4 +151,4 @@ func getEnvBool(key string, defaultValue bool) bool {
 		}
 	}
 	return defaultValue
-} 
+}

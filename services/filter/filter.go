@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 
+	"job-scorer/config"
 	"job-scorer/models"
 	"job-scorer/utils"
 
@@ -11,24 +12,28 @@ import (
 )
 
 type Filter struct {
-	unwantedLocations []string
+	unwantedLocations    []string
 	unwantedWordsInTitle []string
-	logger            *utils.Logger
-	languageDetector  lingua.LanguageDetector
+	policy               config.FilterPolicy
+	notificationPolicy   config.NotificationPolicy
+	primaryLanguage      lingua.Language
+	detectionLanguages   []lingua.Language
+	logger               *utils.Logger
+	languageDetector     lingua.LanguageDetector
 }
 
-func NewFilter(logger *utils.Logger) *Filter {
-	unwantedLocations := []string{
-		"EMEA", "DACH", "Switzerland (Remote)", "Europe", "EU",
+func NewFilter(policy config.FilterPolicy, notificationPolicy config.NotificationPolicy, logger *utils.Logger) *Filter {
+	detectionLanguages := toLinguaLanguages(policy.DetectionLanguages)
+	if len(detectionLanguages) == 0 {
+		detectionLanguages = []lingua.Language{lingua.English, lingua.German, lingua.French}
+	}
+	primaryLanguage := parseLanguage(policy.PrimaryLanguage)
+	if primaryLanguage == lingua.Unknown {
+		primaryLanguage = lingua.English
 	}
 
-	unwantedWordsInTitle := []string{
-		"Head", "Senior", "Director", "Sr.",
-	}
-
-	// Initialize language detector for German, English, and French
 	detector := lingua.NewLanguageDetectorBuilder().
-		FromLanguages(lingua.German, lingua.English, lingua.French).
+		FromLanguages(detectionLanguages...).
 		WithMinimumRelativeDistance(0.9).
 		Build()
 
@@ -38,22 +43,26 @@ func NewFilter(logger *utils.Logger) *Filter {
 	}
 
 	return &Filter{
-		unwantedLocations: unwantedLocations,
-		unwantedWordsInTitle: unwantedWordsInTitle,
-		logger:            logger,
-		languageDetector:  detector,
+		unwantedLocations:    policy.UnwantedLocations,
+		unwantedWordsInTitle: policy.UnwantedWordsInTitle,
+		policy:               policy,
+		notificationPolicy:   notificationPolicy,
+		primaryLanguage:      primaryLanguage,
+		detectionLanguages:   detectionLanguages,
+		logger:               logger,
+		languageDetector:     detector,
 	}
 }
 
 func (f *Filter) PrefilterJobs(jobs []*models.Job) []*models.Job {
 	var filteredJobs []*models.Job
-	
+
 	for _, job := range jobs {
 		if f.shouldIncludeJob(job) {
 			filteredJobs = append(filteredJobs, job)
 		}
 	}
-	
+
 	return filteredJobs
 }
 
@@ -71,12 +80,12 @@ func (f *Filter) shouldIncludeJob(job *models.Job) bool {
 			return false
 		}
 	}
-	
-	// Check if job title is in German
+
+	// Check if job title is in configured primary language.
 	if !f.isEnglishText(job.Position) {
 		return false
 	}
-	
+
 	return true
 }
 
@@ -86,7 +95,7 @@ func (f *Filter) isEnglishText(text string) bool {
 	}
 
 	cleanedText := f.cleanTextForDetection(text)
-	if len(cleanedText) < 8 {
+	if len(cleanedText) < f.policy.MinTextLengthForLanguageDetect {
 		return true // Too short to reliably detect
 	}
 
@@ -97,93 +106,74 @@ func (f *Filter) isEnglishText(text string) bool {
 // Enhanced language detection with multiple validation layers
 func (f *Filter) enhancedLanguageDetection(text string) bool {
 	textLower := strings.ToLower(text)
-	
-	// Layer 1: Check for obvious German requirements (immediate rejection)
-	germanRequirementKeywords := []string{
-		"deutsch erforderlich", "german required", "german fluency", "fluent german",
-		"muttersprache deutsch", "german native", "deutschkenntnisse", 
-		"fließend deutsch", "fluent in german", "german language skills",
-		"deutsch als muttersprache", "german c1", "german c2", "deutsch c1", "deutsch c2",
-		"deutsche sprachkenntnisse", "verhandlungssicher deutsch", "german proficiency",
-	}
-	
-	for _, keyword := range germanRequirementKeywords {
+
+	// Layer 1: Check for explicit red-flag language requirements (immediate rejection).
+	for _, keyword := range f.policy.RedFlagLanguageKeywords {
 		if strings.Contains(textLower, keyword) {
-			f.logger.Debug("Rejected due to German requirement keyword: %s", keyword)
+			f.logger.Debug("Rejected due to red-flag language keyword: %s", keyword)
 			return false
 		}
 	}
-	
-	// Layer 2: Check for German job posting indicators
-	germanJobKeywords := []string{
-		"stellenausschreibung", "arbeitsplatz", "bewerbung", "lebenslauf",
-		"anstellung", "mitarbeiter", "unternehmen", "gesellschaft",
-		"verantwortung", "aufgaben", "anforderungen", "qualifikation",
-		"berufserfahrung", "abschluss", "studium", "ausbildung",
-	}
-	
-	germanKeywordCount := 0
-	for _, keyword := range germanJobKeywords {
+
+	// Layer 2: Check for non-primary language indicators.
+	nonPrimaryKeywordCount := 0
+	for _, keyword := range f.policy.NonPrimaryLanguageKeywords {
 		if strings.Contains(textLower, keyword) {
-			germanKeywordCount++
+			nonPrimaryKeywordCount++
 		}
 	}
-	
-	// If we find 2+ German job keywords, likely German posting
-	if germanKeywordCount >= 2 {
-		f.logger.Debug("Rejected due to %d German job keywords", germanKeywordCount)
+
+	if nonPrimaryKeywordCount >= f.policy.NonPrimaryKeywordMinCount {
+		f.logger.Debug("Rejected due to %d non-primary language keywords", nonPrimaryKeywordCount)
 		return false
 	}
-	
-	// Layer 3: Language library confidence check (more lenient for edge cases)
+
+	// Layer 3: Primary language confidence vs strongest non-primary language.
 	confidenceValues := f.languageDetector.ComputeLanguageConfidenceValues(text)
-	
-	var englishConfidence, germanConfidence float64
+	confidenceByLang := map[lingua.Language]float64{}
 	for _, conf := range confidenceValues {
-		switch conf.Language() {
-		case lingua.English:
-			englishConfidence = conf.Value()
-		case lingua.German:
-			germanConfidence = conf.Value()
+		confidenceByLang[conf.Language()] = conf.Value()
+	}
+	primaryConfidence := confidenceByLang[f.primaryLanguage]
+	maxOtherConfidence := 0.0
+	for _, l := range f.detectionLanguages {
+		if l == f.primaryLanguage {
+			continue
+		}
+		if confidenceByLang[l] > maxOtherConfidence {
+			maxOtherConfidence = confidenceByLang[l]
 		}
 	}
-	
-	// If German confidence is significantly higher than English, reject
-	if germanConfidence > 0.6 && germanConfidence > englishConfidence*1.5 {
-		f.logger.Debug("Rejected due to German confidence %.2f vs English %.2f", 
-			germanConfidence, englishConfidence)
+
+	if maxOtherConfidence > f.policy.NonPrimaryDominanceThreshold &&
+		maxOtherConfidence > primaryConfidence*f.policy.NonPrimaryDominanceRatio {
+		f.logger.Debug("Rejected due to non-primary confidence %.2f vs primary %.2f",
+			maxOtherConfidence, primaryConfidence)
 		return false
 	}
-	
-	// Layer 4: English indicators (positive signals)
-	englishIndicators := []string{
-		"english", "international", "multicultural", "global", "worldwide",
-		"european", "eu", "remote", "hybrid", "flexible", "agile",
-		"you will", "we are", "join our", "opportunity", "experience",
-		"skills", "requirements", "responsibilities", "benefits",
-	}
-	
-	englishIndicatorCount := 0
-	for _, indicator := range englishIndicators {
+
+	primaryIndicatorCount := 0
+	for _, indicator := range f.policy.PrimaryLanguageIndicators {
 		if strings.Contains(textLower, indicator) {
-			englishIndicatorCount++
+			primaryIndicatorCount++
 		}
 	}
-	
-	// If we have English indicators and reasonable confidence, accept
-	if englishIndicatorCount >= 2 && englishConfidence >= 0.15 {
-		f.logger.Debug("Accepted due to %d English indicators and %.2f confidence", 
-			englishIndicatorCount, englishConfidence)
+
+	if primaryIndicatorCount >= f.policy.PrimaryIndicatorMinCount &&
+		primaryConfidence >= f.policy.PrimaryIndicatorMinConfidence &&
+		primaryConfidence >= maxOtherConfidence+f.policy.PrimaryVsNonPrimaryMinDelta {
+		f.logger.Debug("Accepted due to %d primary-language indicators and %.2f confidence",
+			primaryIndicatorCount, primaryConfidence)
 		return true
 	}
-	
-	// Default: accept if English confidence is reasonable
-	englishThreshold := 0.25 // Slightly higher than before for better accuracy
-	result := englishConfidence >= englishThreshold
-	
-	f.logger.Debug("Language detection result: %t (English: %.2f, German: %.2f)", 
-		result, englishConfidence, germanConfidence)
-	
+
+	result := primaryConfidence >= f.policy.DefaultPrimaryThreshold &&
+		primaryConfidence >= maxOtherConfidence+f.policy.PrimaryVsNonPrimaryMinDelta
+
+	if !result {
+		f.logger.Debug("Rejected due to language confidence (Primary: %.2f, Non-primary: %.2f)", primaryConfidence, maxOtherConfidence)
+	}
+
 	return result
 }
 
@@ -197,13 +187,13 @@ func min(a, b int) int {
 
 func (f *Filter) FilterPromisingJobs(jobs []*models.Job, threshold float64) []*models.Job {
 	var promisingJobs []*models.Job
-	
+
 	for _, job := range jobs {
 		if job.IsPromising(threshold) {
 			promisingJobs = append(promisingJobs, job)
 		}
 	}
-	
+
 	f.logger.Info("Found %d promising jobs (score >= %.1f)", len(promisingJobs), threshold)
 	return promisingJobs
 }
@@ -212,17 +202,17 @@ func (f *Filter) FilterNotificationJobs(jobs []*models.Job) []*models.Job {
 	var notificationJobs []*models.Job
 	seenJobIDs := make(map[string]bool) // Track jobs we've already seen
 	var duplicateCount int
-	
+
 	for _, job := range jobs {
-		if job.ShouldNotify() {
+		if f.shouldNotify(job) {
 			// Skip if we've already seen this job ID
 			if job.JobID != "" && seenJobIDs[job.JobID] {
 				duplicateCount++
-				f.logger.Debug("⚠️ Skipping duplicate job in notifications: %s at %s (ID: %s)", 
+				f.logger.Debug("⚠️ Skipping duplicate job in notifications: %s at %s (ID: %s)",
 					job.Position, job.Company, job.JobID)
 				continue
 			}
-			
+
 			// Mark this job ID as seen and add to notifications
 			if job.JobID != "" {
 				seenJobIDs[job.JobID] = true
@@ -230,16 +220,29 @@ func (f *Filter) FilterNotificationJobs(jobs []*models.Job) []*models.Job {
 			notificationJobs = append(notificationJobs, job)
 		}
 	}
-	
+
 	if duplicateCount > 0 {
 		f.logger.Warning("⚠️ Removed %d duplicate jobs from notifications", duplicateCount)
 	}
-	
+
 	f.logger.Info("Found %d unique jobs that should trigger notifications", len(notificationJobs))
 	return notificationJobs
 }
 
-// FilterJobDescription filters out jobs with German descriptions
+func (f *Filter) shouldNotify(job *models.Job) bool {
+	if f.notificationPolicy.RequireShouldSendEmail && !job.ShouldSendEmail {
+		return false
+	}
+	if f.notificationPolicy.RequireFinalScore && job.FinalScore == nil {
+		return false
+	}
+	if job.FinalScore != nil && *job.FinalScore < f.notificationPolicy.MinFinalScore {
+		return false
+	}
+	return true
+}
+
+// FilterJobDescription filters out jobs that are not in primary language.
 func (f *Filter) FilterJobDescription(job *models.Job) bool {
 	if job.JobDescription == "" {
 		f.logger.Debug("Kept job without description through language detection: %s at %s", job.Position, job.Company)
@@ -247,6 +250,40 @@ func (f *Filter) FilterJobDescription(job *models.Job) bool {
 	}
 
 	return f.isEnglishText(job.JobDescription)
+}
+
+func toLinguaLanguages(names []string) []lingua.Language {
+	result := make([]lingua.Language, 0, len(names))
+	for _, name := range names {
+		lang := parseLanguage(name)
+		if lang != lingua.Unknown {
+			result = append(result, lang)
+		}
+	}
+	return result
+}
+
+func parseLanguage(name string) lingua.Language {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "english", "en":
+		return lingua.English
+	case "german", "de":
+		return lingua.German
+	case "french", "fr":
+		return lingua.French
+	case "italian", "it":
+		return lingua.Italian
+	case "spanish", "es":
+		return lingua.Spanish
+	case "portuguese", "pt":
+		return lingua.Portuguese
+	case "dutch", "nl":
+		return lingua.Dutch
+	case "greek", "el":
+		return lingua.Greek
+	default:
+		return lingua.Unknown
+	}
 }
 
 func (f *Filter) cleanTextForDetection(text string) string {
@@ -265,4 +302,4 @@ func (f *Filter) cleanTextForDetection(text string) string {
 	cleaned = strings.TrimSpace(cleaned)
 
 	return cleaned
-} 
+}

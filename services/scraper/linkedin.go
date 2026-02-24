@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"job-scorer/config"
 	"job-scorer/models"
 	"job-scorer/utils"
 
@@ -25,6 +26,7 @@ type LinkedInScraper struct {
 	client     *http.Client
 	cache      *JobCache
 	userAgents []string
+	policy     config.ScraperPolicy
 	logger     *utils.Logger
 }
 
@@ -40,19 +42,19 @@ type CacheItem struct {
 }
 
 type QueryOptions struct {
-	Location         string
-	Keyword          string
-	DateSincePosted  string
-	JobType          string
-	RemoteFilter     string
-	Salary           string
-	ExperienceLevel  string
-	SortBy           string
-	Limit            int
-	Page             int
+	Location        string
+	Keyword         string
+	DateSincePosted string
+	JobType         string
+	RemoteFilter    string
+	Salary          string
+	ExperienceLevel string
+	SortBy          string
+	Limit           int
+	Page            int
 }
 
-func NewLinkedInScraper() *LinkedInScraper {
+func NewLinkedInScraper(policy config.ScraperPolicy) *LinkedInScraper {
 	userAgents := []string{
 		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
 		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
@@ -75,12 +77,13 @@ func NewLinkedInScraper() *LinkedInScraper {
 	}
 
 	return &LinkedInScraper{
-		client:     client,
-		cache:      &JobCache{
+		client: client,
+		cache: &JobCache{
 			cache: make(map[string]CacheItem),
 			ttl:   time.Hour,
 		},
 		userAgents: userAgents,
+		policy:     policy,
 		logger:     utils.NewLogger("LinkedInScraper"),
 	}
 }
@@ -151,7 +154,7 @@ func (s *LinkedInScraper) decompressResponse(body []byte, contentEncoding string
 			return nil, fmt.Errorf("error creating gzip reader: %w", err)
 		}
 		defer gzipReader.Close()
-		
+
 		decompressed, err := io.ReadAll(gzipReader)
 		if err != nil {
 			return nil, fmt.Errorf("error decompressing gzip: %w", err)
@@ -165,8 +168,6 @@ func (s *LinkedInScraper) decompressResponse(body []byte, contentEncoding string
 func (s *LinkedInScraper) Query(options QueryOptions) ([]*models.Job, error) {
 	var allJobs []*models.Job
 	start := 0
-	const batchSize = 10
-	const maxConsecutiveErrors = 3
 	consecutiveErrors := 0
 	hasMore := true
 
@@ -174,19 +175,19 @@ func (s *LinkedInScraper) Query(options QueryOptions) ([]*models.Job, error) {
 
 	for hasMore {
 		s.logger.Info("Fetching batch starting at position %d", start)
-		
+
 		jobs, err := s.fetchJobBatch(options, start)
 		if err != nil {
 			consecutiveErrors++
 			s.logger.Error("Error fetching batch (attempt %d): %v", consecutiveErrors, err)
-			
-			if consecutiveErrors >= maxConsecutiveErrors {
+
+			if consecutiveErrors >= s.policy.MaxConsecutiveErrors {
 				s.logger.Error("Max consecutive errors reached. Stopping pagination.")
 				break
 			}
-			
+
 			// Exponential backoff
-			delay := time.Duration(math.Pow(2, float64(consecutiveErrors))) * time.Second
+			delay := time.Duration(math.Pow(float64(s.policy.ConsecutiveBackoffBaseSecs), float64(consecutiveErrors))) * time.Second
 			s.logger.Info("Retrying after %v delay...", delay)
 			time.Sleep(delay)
 			continue
@@ -212,10 +213,9 @@ func (s *LinkedInScraper) Query(options QueryOptions) ([]*models.Job, error) {
 		}
 
 		// Move to next batch
-		start += batchSize
+		start += s.policy.PaginationBatchSize
 
-		// Add delay between requests (2-5 seconds)
-		delay := time.Duration(1000+rand.Intn(2000)) * time.Millisecond
+		delay := randomDurationMs(s.policy.InterBatchDelayMinMs, s.policy.InterBatchDelayMaxMs)
 		s.logger.Info("Waiting %v before next batch...", delay)
 		time.Sleep(delay)
 	}
@@ -247,7 +247,7 @@ func (s *LinkedInScraper) fetchJobBatch(options QueryOptions, start int) ([]*mod
 	if options.ExperienceLevel != "" {
 		params.Add("f_E", s.getExperienceLevel(options.ExperienceLevel))
 	}
-	
+
 	// Add start parameter for pagination
 	params.Add("start", strconv.Itoa(start))
 
@@ -271,15 +271,15 @@ func (s *LinkedInScraper) fetchJobBatch(options QueryOptions, start int) ([]*mod
 	// Use API headers
 	req.Header = s.getAPIHeaders()
 
-	maxRetries := 3
+	maxRetries := s.policy.MaxRequestRetries
 	var lastErr error
 	var resp *http.Response
 
 	for i := 0; i < maxRetries; i++ {
 		if i > 0 {
 			// Exponential backoff with jitter
-			delay := time.Duration(math.Pow(2, float64(i))*float64(time.Second)) +
-				time.Duration(rand.Int63n(int64(time.Second)))
+			delay := time.Duration(math.Pow(float64(s.policy.RetryBackoffBaseSecs), float64(i))*float64(time.Second)) +
+				time.Duration(rand.Int63n(int64(s.policy.RetryJitterMaxMs))*int64(time.Millisecond))
 			s.logger.Info("Retry %d after %v delay...", i+1, delay)
 			time.Sleep(delay)
 		}
@@ -301,7 +301,7 @@ func (s *LinkedInScraper) fetchJobBatch(options QueryOptions, start int) ([]*mod
 		if resp.Body != nil {
 			bodyBytes, bodyErr := io.ReadAll(resp.Body)
 			if bodyErr == nil {
-				s.logger.Info("Error response body: %s", string(bodyBytes[:min(len(bodyBytes), 500)]))
+				s.logger.Info("Error response body: %s", string(bodyBytes[:min(len(bodyBytes), s.policy.ErrorBodyPreviewLength)]))
 			}
 			resp.Body.Close()
 		}
@@ -362,46 +362,41 @@ func (s *LinkedInScraper) fetchJobBatch(options QueryOptions, start int) ([]*mod
 func (s *LinkedInScraper) parseJobs(doc *goquery.Document) []*models.Job {
 	var jobs []*models.Job
 
-	s.logger.Debug("Starting job parsing...")
-	
-	// Try multiple selectors
-	selectors := []string{
-		".job-search-card",
-		".jobs-search__results-list li",
-		"li[data-entity-urn]",
-		".result-card",
-		".job-result-card",
-		"li",
+	if s.policy.VerboseParseLogs {
+		s.logger.Debug("Starting job parsing...")
 	}
 
-	for _, selector := range selectors {
+	// Try multiple selectors
+	for _, selector := range s.policy.Selectors {
 		elements := doc.Find(selector)
-		s.logger.Debug("Selector '%s' found %d elements", selector, elements.Length())
-		
+		if s.policy.VerboseParseLogs {
+			s.logger.Debug("Selector '%s' found %d elements", selector, elements.Length())
+		}
+
 		if elements.Length() > 0 {
-			elements.Each(func(i int, selection *goquery.Selection) {				
+			elements.Each(func(i int, selection *goquery.Selection) {
 				job := s.parseJobCard(selection)
 				if job != nil {
 					jobs = append(jobs, job)
-					s.logger.Debug("Successfully parsed job: %s at %s", job.Position, job.Company)
+					if s.policy.VerboseParseLogs {
+						s.logger.Debug("Successfully parsed job: %s at %s", job.Position, job.Company)
+					}
 				}
 			})
-			
+
 			if len(jobs) > 0 {
 				break // Stop trying other selectors if we found jobs
 			}
 		}
 	}
 
-	s.logger.Debug("Total jobs parsed: %d", len(jobs))
+	if s.policy.VerboseParseLogs {
+		s.logger.Debug("Total jobs parsed: %d", len(jobs))
+	}
 	return jobs
 }
 
 func (s *LinkedInScraper) parseJobCard(selection *goquery.Selection) *models.Job {
-	// Debug the selection
-	html, _ := selection.Html()
-	s.logger.Debug("Parsing job card HTML: %s", html[:min(len(html), 300)])
-
 	// Try multiple selectors for each field
 	titleSelectors := []string{
 		"h3.base-search-card__title",
@@ -419,14 +414,15 @@ func (s *LinkedInScraper) parseJobCard(selection *goquery.Selection) *models.Job
 		if element.Length() > 0 {
 			position = strings.TrimSpace(element.Text())
 			if position != "" {
-				s.logger.Debug("Found position with selector '%s': %s", selector, position)
 				break
 			}
 		}
 	}
 
 	if position == "" {
-		s.logger.Debug("No position found, skipping job card")
+		if s.policy.VerboseParseLogs {
+			s.logger.Debug("No position found, skipping job card")
+		}
 		return nil
 	}
 
@@ -445,7 +441,6 @@ func (s *LinkedInScraper) parseJobCard(selection *goquery.Selection) *models.Job
 		if element.Length() > 0 {
 			company = strings.TrimSpace(element.Text())
 			if company != "" {
-				s.logger.Debug("Found company with selector '%s': %s", selector, company)
 				break
 			}
 		}
@@ -464,7 +459,6 @@ func (s *LinkedInScraper) parseJobCard(selection *goquery.Selection) *models.Job
 		if element.Length() > 0 {
 			location = strings.TrimSpace(element.Text())
 			if location != "" {
-				s.logger.Debug("Found location with selector '%s': %s", selector, location)
 				break
 			}
 		}
@@ -487,7 +481,6 @@ func (s *LinkedInScraper) parseJobCard(selection *goquery.Selection) *models.Job
 				if !strings.HasPrefix(jobURL, "http") {
 					jobURL = "https://www.linkedin.com" + jobURL
 				}
-				s.logger.Debug("Found job URL with selector '%s': %s", selector, jobURL)
 				break
 			}
 		}
@@ -506,7 +499,6 @@ func (s *LinkedInScraper) parseJobCard(selection *goquery.Selection) *models.Job
 		if element.Length() > 0 {
 			if src, exists := element.Attr("src"); exists {
 				companyLogo = src
-				s.logger.Debug("Found logo with selector '%s': %s", selector, companyLogo)
 				break
 			}
 		}
@@ -525,7 +517,6 @@ func (s *LinkedInScraper) parseJobCard(selection *goquery.Selection) *models.Job
 		if element.Length() > 0 {
 			agoTime = strings.TrimSpace(element.Text())
 			if agoTime != "" {
-				s.logger.Debug("Found time with selector '%s': %s", selector, agoTime)
 				break
 			}
 		}
@@ -545,7 +536,6 @@ func (s *LinkedInScraper) parseJobCard(selection *goquery.Selection) *models.Job
 			salaryText := strings.TrimSpace(element.Text())
 			if salaryText != "" {
 				salary = salaryText
-				s.logger.Debug("Found salary with selector '%s': %s", selector, salary)
 				break
 			}
 		}
@@ -554,7 +544,9 @@ func (s *LinkedInScraper) parseJobCard(selection *goquery.Selection) *models.Job
 	// Create current date as posting date
 	date := time.Now().Format("2006-01-02")
 
-	s.logger.Debug("Creating job: position=%s, company=%s, location=%s", position, company, location)
+	if s.policy.VerboseParseLogs {
+		s.logger.Debug("Creating job: position=%s, company=%s, location=%s", position, company, location)
+	}
 
 	job, err := models.NewJob(position, company, location, date, salary, jobURL, companyLogo, agoTime)
 	if err != nil {
@@ -579,8 +571,7 @@ func (s *LinkedInScraper) FetchJobDescription(jobURL string) (string, error) {
 
 	s.logger.Info("Fetching job description from: %s", jobURL)
 
-	// Add random delay
-	time.Sleep(time.Duration(rand.Intn(2000)+500) * time.Millisecond)
+	time.Sleep(randomDurationMs(s.policy.DescriptionDelayMinMs, s.policy.DescriptionDelayMaxMs))
 
 	req, err := http.NewRequest("GET", jobURL, nil)
 	if err != nil {
@@ -611,8 +602,7 @@ func (s *LinkedInScraper) FetchJobDescription(jobURL string) (string, error) {
 		return "", err
 	}
 
-	s.logger.Info("Response body length: %d bytes", len(decompressedBody))
-	s.logger.Info("Response body preview: %s", string(decompressedBody[:min(len(decompressedBody), 1000)]))
+	s.logger.Debug("Description response length: %d bytes", len(decompressedBody))
 
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(decompressedBody))
 	if err != nil {
@@ -653,13 +643,13 @@ func (s *LinkedInScraper) cleanDescription(desc string) string {
 	// Remove excessive whitespace
 	re := regexp.MustCompile(`\s+`)
 	desc = re.ReplaceAllString(desc, " ")
-	
+
 	// Trim and limit length
 	desc = strings.TrimSpace(desc)
-	if len(desc) > 5000 {
-		desc = desc[:5000] + "..."
+	if len(desc) > s.policy.DescriptionMaxLength {
+		desc = desc[:s.policy.DescriptionMaxLength] + "..."
 	}
-	
+
 	return desc
 }
 
@@ -683,12 +673,12 @@ func (s *LinkedInScraper) getDateSincePosted(dateSince string) string {
 
 func (s *LinkedInScraper) getExperienceLevel(level string) string {
 	experienceRange := map[string]string{
-		"internship":   "1",
-		"entry level":  "2",
-		"associate":    "3",
-		"senior":       "4",
-		"director":     "5",
-		"executive":    "6",
+		"internship":  "1",
+		"entry level": "2",
+		"associate":   "3",
+		"senior":      "4",
+		"director":    "5",
+		"executive":   "6",
 	}
 	if val, ok := experienceRange[strings.ToLower(level)]; ok {
 		return val
@@ -739,28 +729,35 @@ func (c *JobCache) Set(key string, value interface{}) {
 func (c *JobCache) Get(key string) interface{} {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	
+
 	item, exists := c.cache[key]
 	if !exists {
 		return nil
 	}
-	
+
 	if time.Since(item.Timestamp) > c.ttl {
 		delete(c.cache, key)
 		return nil
 	}
-	
+
 	return item.Data
 }
 
 func (c *JobCache) Clear() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	now := time.Now()
 	for key, item := range c.cache {
 		if now.Sub(item.Timestamp) > c.ttl {
 			delete(c.cache, key)
 		}
 	}
-} 
+}
+
+func randomDurationMs(minMs, maxMs int) time.Duration {
+	if maxMs <= minMs {
+		return time.Duration(minMs) * time.Millisecond
+	}
+	return time.Duration(minMs+rand.Intn(maxMs-minMs)) * time.Millisecond
+}

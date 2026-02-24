@@ -16,26 +16,26 @@ import (
 // checkStartupFlag checks if the application has already run recently (within 30 minutes)
 func checkStartupFlag(dataDir string) bool {
 	flagFile := filepath.Join(dataDir, "startup_flag.txt")
-	
+
 	// Check if flag file exists and was created recently
 	if info, err := os.Stat(flagFile); err == nil {
 		// Allow rerun if more than 30 minutes have passed
 		timeSinceLastRun := time.Since(info.ModTime())
 		return timeSinceLastRun < 30*time.Minute
 	}
-	
+
 	return false
 }
 
 // createStartupFlag creates a flag file to mark that startup processing has run
 func createStartupFlag(dataDir string) error {
 	flagFile := filepath.Join(dataDir, "startup_flag.txt")
-	
+
 	// Ensure directory exists
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return err
 	}
-	
+
 	// Create flag file with current timestamp
 	content := fmt.Sprintf("Startup processing completed at %s\n", time.Now().Format(time.RFC3339))
 	return os.WriteFile(flagFile, []byte(content), 0644)
@@ -43,7 +43,7 @@ func createStartupFlag(dataDir string) error {
 
 func main() {
 	logger := utils.NewLogger("Main")
-	
+
 	logger.Info("🚀 Starting Job Scorer application...")
 
 	// Get port from environment variable (Cloud Run requirement)
@@ -88,10 +88,10 @@ func main() {
 	if cfg.App.RunOnStartup {
 		// Check if we're in development mode by looking for Air or development indicators
 		isDevMode := os.Getenv("AIR_MAIN_BINARY") != "" || os.Getenv("DEV_MODE") == "true"
-		
+
 		// Check if we've already run startup processing recently (within 30 minutes)
 		hasRunRecently := checkStartupFlag(cfg.App.DataDir)
-		
+
 		if isDevMode {
 			logger.Info("Skipping initial job processing in development mode (hot reload detected)")
 		} else if hasRunRecently {
@@ -206,18 +206,18 @@ func setupHTTPHandlers(cfg *config.Config, jobController *controller.JobControll
 		}
 
 		logger.Info("🔄 Received request to run job processing (triggered via HTTP)")
-		
+
 		start := time.Now()
 		if err := jobController.SearchAndFilterJobs(); err != nil {
 			logger.Error("Failed to process jobs: %v", err)
 			http.Error(w, fmt.Sprintf("Failed to process jobs: %v", err), http.StatusInternalServerError)
 			return
 		}
-		
+
 		duration := time.Since(start)
 		message := fmt.Sprintf("✅ Job processing completed successfully in %v", duration)
-		logger.Info(message)
-		
+		logger.Info("%s", message)
+
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(fmt.Sprintf(`{"status":"success","message":"%s","duration":"%v"}`, message, duration)))
 	})
@@ -225,7 +225,7 @@ func setupHTTPHandlers(cfg *config.Config, jobController *controller.JobControll
 	// Statistics endpoint
 	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		stats := jobController.GetStats()
-		
+
 		w.Header().Set("Content-Type", "text/html")
 		html := `
 <!DOCTYPE html>
@@ -249,12 +249,12 @@ func setupHTTPHandlers(cfg *config.Config, jobController *controller.JobControll
 			html += fmt.Sprintf(`
         <div class="stat-item">Locations: %v</div>
         <div class="stat-item">Cron Schedule: %v</div>
-        <div class="stat-item">Groq API: <span class="badge %v">%v</span></div>
+        <div class="stat-item">LLM API: <span class="badge %v">%v</span></div>
         <div class="stat-item">SMTP: <span class="badge %v">%v</span></div>
         <div class="stat-item">CV Loaded: <span class="badge %v">%v</span></div>`,
 				configStats["locations"],
 				configStats["cron_schedule"],
-				configStats["groq_configured"], configStats["groq_configured"],
+				configStats["llm_configured"], configStats["llm_configured"],
 				configStats["smtp_configured"], configStats["smtp_configured"],
 				configStats["cv_loaded"], configStats["cv_loaded"])
 		}
@@ -290,14 +290,14 @@ func setupHTTPHandlers(cfg *config.Config, jobController *controller.JobControll
     <p><a href="/">← Back to Home</a></p>
 </body>
 </html>`
-		
+
 		w.Write([]byte(html))
 	})
 }
 
 func validateConfig(cfg *config.Config) error {
-	if cfg.Groq.APIKey == "" {
-		return fmt.Errorf("GROQ_API_KEY is required")
+	if cfg.OpenAI.APIKey == "" {
+		return fmt.Errorf("OPENAI_API_KEY is required (or GROQ_API_KEY for backward compatibility)")
 	}
 
 	if len(cfg.App.Locations) == 0 {
@@ -323,9 +323,9 @@ func printApplicationStatus(cfg *config.Config, jobController *controller.JobCon
 	logger.Info("   🏃 Run on Startup: %t", cfg.App.RunOnStartup)
 	logger.Info("   📄 CV Path: %s", cfg.App.CVPath)
 	logger.Info("   💾 Output Directory: %s", cfg.App.OutputDir)
-	logger.Info("   🤖 Groq Model: %s", cfg.Groq.Model)
+	logger.Info("   🤖 LLM Model: %s", cfg.OpenAI.Model)
 	logger.Info("   🚦 Rate Limit: %d requests per minute", cfg.RateLimit.MaxRequests)
-	
+
 	if cfg.SMTP.Host != "" {
 		recipients := strings.Join(cfg.SMTP.ToRecipients, ", ")
 		logger.Info("   📧 Email Notifications: Enabled (%s → %s)", cfg.SMTP.From, recipients)
@@ -337,8 +337,8 @@ func printApplicationStatus(cfg *config.Config, jobController *controller.JobCon
 	stats := jobController.GetStats()
 	if configStats, ok := stats["config"].(map[string]interface{}); ok {
 		logger.Info("📊 Service Status:")
-		logger.Info("   ✅ Groq API: %t", configStats["groq_configured"])
+		logger.Info("   ✅ LLM API: %t", configStats["llm_configured"])
 		logger.Info("   ✅ SMTP: %t", configStats["smtp_configured"])
 		logger.Info("   ✅ CV Loaded: %t", configStats["cv_loaded"])
 	}
-} 
+}

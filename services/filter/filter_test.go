@@ -3,13 +3,46 @@ package filter
 import (
 	"testing"
 
+	"job-scorer/config"
 	"job-scorer/models"
 	"job-scorer/utils"
 )
 
+func testPolicies() (config.FilterPolicy, config.NotificationPolicy) {
+	return config.FilterPolicy{
+		UnwantedLocations: []string{"EMEA", "DACH", "Switzerland (Remote)", "Europe", "EU"},
+		UnwantedWordsInTitle: []string{"Head", "Senior", "Director", "Sr."},
+		PrimaryLanguage:    "english",
+		DetectionLanguages: []string{"english", "german", "french"},
+		RedFlagLanguageKeywords: []string{
+			"deutsch erforderlich", "german required", "german fluency", "fluent german",
+		},
+		NonPrimaryLanguageKeywords: []string{
+			"stellenausschreibung", "arbeitsplatz", "bewerbung", "lebenslauf",
+			"anstellung", "mitarbeiter", "unternehmen", "gesellschaft",
+		},
+		PrimaryLanguageIndicators: []string{
+			"english", "international", "global", "you will", "we are", "skills", "requirements",
+		},
+		NonPrimaryKeywordMinCount:       2,
+		NonPrimaryDominanceThreshold:    0.60,
+		NonPrimaryDominanceRatio:        1.50,
+		PrimaryIndicatorMinCount:        2,
+		PrimaryIndicatorMinConfidence:   0.40,
+		DefaultPrimaryThreshold:         0.40,
+		PrimaryVsNonPrimaryMinDelta:     0.05,
+		MinTextLengthForLanguageDetect: 8,
+	}, config.NotificationPolicy{
+		MinFinalScore:          0,
+		RequireShouldSendEmail: true,
+		RequireFinalScore:      true,
+	}
+}
+
 func TestNewFilter(t *testing.T) {
 	logger := utils.NewLogger("Test")
-	filter := NewFilter(logger)
+	filterPolicy, notificationPolicy := testPolicies()
+	filter := NewFilter(filterPolicy, notificationPolicy, logger)
 	if filter == nil {
 		t.Errorf("NewFilter() returned nil")
 	}
@@ -17,7 +50,8 @@ func TestNewFilter(t *testing.T) {
 
 func TestFilter_PrefilterJobs(t *testing.T) {
 	logger := utils.NewLogger("Test")
-	filter := NewFilter(logger)
+	filterPolicy, notificationPolicy := testPolicies()
+	filter := NewFilter(filterPolicy, notificationPolicy, logger)
 	
 	// Create test jobs
 	jobs := []*models.Job{
@@ -66,7 +100,8 @@ func TestFilter_PrefilterJobs(t *testing.T) {
 
 func TestFilter_FilterPromisingJobs(t *testing.T) {
 	logger := utils.NewLogger("Test")
-	filter := NewFilter(logger)
+	filterPolicy, notificationPolicy := testPolicies()
+	filter := NewFilter(filterPolicy, notificationPolicy, logger)
 	
 	score1 := 8.0
 	score2 := 5.0
@@ -116,7 +151,8 @@ func TestFilter_FilterPromisingJobs(t *testing.T) {
 
 func TestFilter_FilterNotificationJobs(t *testing.T) {
 	logger := utils.NewLogger("Test")
-	filter := NewFilter(logger)
+	filterPolicy, notificationPolicy := testPolicies()
+	filter := NewFilter(filterPolicy, notificationPolicy, logger)
 	
 	score1 := 8.0
 	score2 := 5.0
@@ -170,7 +206,8 @@ func TestFilter_FilterNotificationJobs(t *testing.T) {
 
 func TestFilter_FilterJobDescription(t *testing.T) {
 	logger := utils.NewLogger("Test")
-	filter := NewFilter(logger)
+	filterPolicy, notificationPolicy := testPolicies()
+	filter := NewFilter(filterPolicy, notificationPolicy, logger)
 	
 	tests := []struct {
 		name        string

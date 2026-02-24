@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"job-scorer/config"
 	"job-scorer/models"
 	"job-scorer/services/cv"
 	"job-scorer/services/filter"
@@ -15,27 +16,29 @@ import (
 )
 
 type Evaluator struct {
-	groqClient *GroqClient
-	cvReader   *cv.CVReader
-	scraper    *scraper.LinkedInScraper
-	filter     *filter.Filter
-	rateLimiter *utils.RateLimiter
-	logger     *utils.Logger
+	openAIClient *OpenAIClient
+	cvReader     *cv.CVReader
+	scraper      *scraper.LinkedInScraper
+	filter       *filter.Filter
+	policy       config.Policy
+	rateLimiter  *utils.RateLimiter
+	logger       *utils.Logger
 }
 
-func NewEvaluator(groqClient *GroqClient, cvReader *cv.CVReader, linkedInScraper *scraper.LinkedInScraper, rateLimiter *utils.RateLimiter, logger *utils.Logger) *Evaluator {
+func NewEvaluator(openAIClient *OpenAIClient, cvReader *cv.CVReader, linkedInScraper *scraper.LinkedInScraper, rateLimiter *utils.RateLimiter, policy config.Policy, logger *utils.Logger) *Evaluator {
 	// Use provided logger or create a new one
 	if logger == nil {
 		logger = utils.NewLogger("Evaluator")
 	}
 
 	return &Evaluator{
-		groqClient:  groqClient,
-		cvReader:    cvReader,
-		scraper:     linkedInScraper,
-		filter:      filter.NewFilter(logger),
-		rateLimiter: rateLimiter,
-		logger:      logger,
+		openAIClient: openAIClient,
+		cvReader:     cvReader,
+		scraper:      linkedInScraper,
+		filter:       filter.NewFilter(policy.Filters, policy.Notification, logger),
+		policy:       policy,
+		rateLimiter:  rateLimiter,
+		logger:       logger,
 	}
 }
 
@@ -45,12 +48,12 @@ func (e *Evaluator) EvaluateJob(job *models.Job) (*models.Job, error) {
 		e.logger.Error("Rate limiter error: %v", err)
 		return job, err
 	}
-	
+
 	prompt := e.getInitialPrompt(job)
-	
+
 	e.logger.Debug("Evaluating job: %s at %s", job.Position, job.Company)
-	
-	response, err := e.groqClient.ChatCompletion(prompt, 256)
+
+	response, err := e.openAIClient.ChatCompletion(prompt, e.policy.Evaluation.MaxTokens.Initial)
 	if err != nil {
 		e.logger.Error("Error evaluating job: %v", err)
 		job.Score = nil
@@ -61,15 +64,15 @@ func (e *Evaluator) EvaluateJob(job *models.Job) (*models.Job, error) {
 	e.logger.Debug("Raw evaluation response for %s: %s", job.Position, response)
 	score, reason, reasons := e.parseEvaluationResponse(response)
 	job.Score = score
-	job.Reason = reason      // For backward compatibility
-	job.Reasons = reasons    // Store all reasons
+	job.Reason = reason   // For backward compatibility
+	job.Reasons = reasons // Store all reasons
 
 	if score != nil {
 		if len(reasons) > 0 {
-			e.logger.Info("Job '%s' at '%s' scored: %.1f - Reasons: %v", 
+			e.logger.Info("Job '%s' at '%s' scored: %.1f - Reasons: %v",
 				job.Position, job.Company, *score, reasons)
 		} else {
-			e.logger.Info("Job '%s' at '%s' scored: %.1f - %s", 
+			e.logger.Info("Job '%s' at '%s' scored: %.1f - %s",
 				job.Position, job.Company, *score, reason)
 		}
 	} else {
@@ -92,14 +95,14 @@ func (e *Evaluator) EvaluateJobWithCV(job *models.Job) (*models.Job, error) {
 	if jobDescription != "Job description not available" {
 		if !e.filter.FilterJobDescription(job) {
 			e.logger.Warning("Filtered out non-English job description: %s at %s", job.Position, job.Company)
-			
+
 			// Set a low score and don't send email for non-English job descriptions
 			zeroScore := 0.0
 			job.FinalScore = &zeroScore
 			job.ShouldSendEmail = false
 			job.FinalReason = "Job description is not in English"
 			job.FinalReasons = []string{"Job description is not in English"}
-			
+
 			return job, nil
 		} else {
 			e.logger.Debug("Job description passed language filter: %s at %s", job.Position, job.Company)
@@ -118,12 +121,12 @@ func (e *Evaluator) EvaluateJobWithCV(job *models.Job) (*models.Job, error) {
 		e.logger.Error("Rate limiter error: %v", err)
 		return job, err
 	}
-	
+
 	prompt := e.getFinalPrompt(job, jobDescription, cvText)
-	
+
 	e.logger.Debug("Final evaluation for job: %s at %s", job.Position, job.Company)
-	
-	response, err := e.groqClient.ChatCompletion(prompt, 512)
+
+	response, err := e.openAIClient.ChatCompletion(prompt, e.policy.Evaluation.MaxTokens.Final)
 	if err != nil {
 		e.logger.Error("Error in final evaluation: %v", err)
 		return job, err
@@ -133,15 +136,15 @@ func (e *Evaluator) EvaluateJobWithCV(job *models.Job) (*models.Job, error) {
 	finalScore, shouldSendEmail, finalReason, finalReasons := e.parseFinalEvaluationResponse(response)
 	job.FinalScore = finalScore
 	job.ShouldSendEmail = shouldSendEmail
-	job.FinalReason = finalReason    // For backward compatibility
-	job.FinalReasons = finalReasons  // Store all reasons
+	job.FinalReason = finalReason   // For backward compatibility
+	job.FinalReasons = finalReasons // Store all reasons
 
 	if finalScore != nil {
 		if len(finalReasons) > 0 {
-			e.logger.Info("Final score for '%s' at '%s': %.1f, Send email: %t, Reasons: %v", 
+			e.logger.Info("Final score for '%s' at '%s': %.1f, Send email: %t, Reasons: %v",
 				job.Position, job.Company, *finalScore, shouldSendEmail, finalReasons)
 		} else {
-			e.logger.Info("Final score for '%s' at '%s': %.1f, Send email: %t, Reason: %s", 
+			e.logger.Info("Final score for '%s' at '%s': %.1f, Send email: %t, Reason: %s",
 				job.Position, job.Company, *finalScore, shouldSendEmail, finalReason)
 		}
 	}
@@ -164,7 +167,7 @@ func (e *Evaluator) BatchEvaluateJobs(jobs []*models.Job, batchSize int) ([]*mod
 		if end > len(jobs) {
 			end = len(jobs)
 		}
-		
+
 		batch := jobs[i:end]
 		e.logger.Progress(i+1, len(jobs), "Batch evaluating jobs %d-%d", i+1, end)
 
@@ -174,7 +177,7 @@ func (e *Evaluator) BatchEvaluateJobs(jobs []*models.Job, batchSize int) ([]*mod
 		}
 
 		batchPrompt := e.getBatchInitialPrompt(batch)
-		response, err := e.groqClient.ChatCompletion(batchPrompt, 512) // Increased tokens for batch
+		response, err := e.openAIClient.ChatCompletion(batchPrompt, e.policy.Evaluation.MaxTokens.Batch)
 		if err != nil {
 			errorCount++
 			e.logger.Error("Batch evaluation failed for jobs %d-%d: %v", i+1, end, err)
@@ -204,16 +207,9 @@ func (e *Evaluator) getBatchInitialPrompt(jobs []*models.Job) string {
 `, i+1, job.Position, job.Company, job.Location)
 	}
 
-	return fmt.Sprintf(`Rate jobs 0-10 for EU candidate (Basel/Zurich, entry-level).
-
-GOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR
-BAD FIELDS: Engineering, Data Science, Finance, Legal, Medical
-GOOD LEVEL: Entry, Junior, Intern, Graduate, Trainee, Assistant  
-BAD LEVEL: Senior, Lead, Director, 5+ years
-
-%s
-Respond with JSON array:
-[{"jobId": 1, "score": X, "recommend": true/false, "reasons": ["brief reason"]}, ...]`, jobsText)
+	return renderTemplate(e.policy.Evaluation.BatchPromptTemplate, map[string]string{
+		"JOBS": jobsText,
+	})
 }
 
 // parseBatchEvaluationResponse parses responses for multiple jobs
@@ -284,57 +280,48 @@ func (e *Evaluator) fallbackToIndividualEvaluation(jobs []*models.Job) []*models
 }
 
 func (e *Evaluator) getInitialPrompt(job *models.Job) string {
-  return fmt.Sprintf(`Rate job 0-10 for EU candidate (Basel/Zurich, entry-level).
-
-GOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR
-BAD FIELDS: Engineering, Data Science, Finance, Legal, Medical
-GOOD LEVEL: Entry, Junior, Intern, Graduate, Trainee, Assistant  
-BAD LEVEL: Senior, Lead, Director, 5+ years
-
-Job: "%s" at %s (%s)
-
-Respond JSON only:
-{"score": X, "recommend": true/false, "reasons": ["brief reason"]}`, 
-    job.Position, job.Company, job.Location)
+	return renderTemplate(e.policy.Evaluation.InitialPromptTemplate, map[string]string{
+		"POSITION": job.Position,
+		"COMPANY":  job.Company,
+		"LOCATION": job.Location,
+	})
 }
 
 func (e *Evaluator) getFinalPrompt(job *models.Job, jobDesc, cv string) string {
-  cleanCV := cleanCVForPrompt(cv)
-  
-  return fmt.Sprintf(`CV vs Job match analysis (0-10).
-
-RED FLAGS (score=0): German required, Deutsch erforderlich, non-English fluency
-MATCH: Skills, experience level (0-2yrs), Basel/Zurich location
-SKILLS: Marketing, Business Dev, Operations, Admin, Strategy, HR
-
-CV:
-%s
-
-Job: "%s" at %s (%s)
-Description: %s
-
-JSON only:
-{"finalScore": X, "shouldApply": true/false, "reasons": ["key reason"]}`, 
-    cleanCV, job.Position, job.Company, job.Location, jobDesc)
+	cleanCV := cleanCVForPrompt(cv, e.policy.Evaluation.CVPromptTruncation)
+	return renderTemplate(e.policy.Evaluation.FinalPromptTemplate, map[string]string{
+		"CV":             cleanCV,
+		"POSITION":       job.Position,
+		"COMPANY":        job.Company,
+		"LOCATION":       job.Location,
+		"JOB_DESCRIPTION": jobDesc,
+	})
 }
 
 // Helper function to clean CV text
-func cleanCVForPrompt(cv string) string {
+func cleanCVForPrompt(cv string, cfg config.CVPromptCfg) string {
 	// Remove excessive whitespace
 	cv = strings.Join(strings.Fields(cv), " ")
-	
+
 	// Truncate if too long (keep most relevant parts)
-	if len(cv) > 2000 {
-		// Keep first 1500 chars and last 500 chars
-		cv = cv[:1500] + "\n\n[CV truncated for length]...\n\n" + cv[len(cv)-500:]
+	if len(cv) > cfg.MaxLength {
+		head := cfg.HeadLength
+		tail := cfg.TailLength
+		if head > len(cv) {
+			head = len(cv)
+		}
+		if tail > len(cv)-head {
+			tail = len(cv) - head
+		}
+		cv = cv[:head] + "\n\n[CV truncated for length]...\n\n" + cv[len(cv)-tail:]
 	}
-	
+
 	// Remove any markdown or formatting that might confuse the LLM
 	cv = strings.ReplaceAll(cv, "**", "")
 	cv = strings.ReplaceAll(cv, "*", "")
 	cv = strings.ReplaceAll(cv, "##", "")
 	cv = strings.ReplaceAll(cv, "#", "")
-	
+
 	return cv
 }
 
@@ -344,13 +331,13 @@ func (e *Evaluator) cleanResponse(response string) string {
 	if match := codeBlockPattern.FindStringSubmatch(response); len(match) > 1 {
 		return strings.TrimSpace(match[1])
 	}
-	
+
 	// Remove regular code blocks (``` ... ```) - enable multiline matching with (?s)
 	codeBlockPattern2 := regexp.MustCompile(`(?s)\x60{3}\s*\n?(.*?)\n?\x60{3}`)
 	if match := codeBlockPattern2.FindStringSubmatch(response); len(match) > 1 {
 		return strings.TrimSpace(match[1])
 	}
-	
+
 	return strings.TrimSpace(response)
 }
 
@@ -551,20 +538,20 @@ func (e *Evaluator) parseStructuredFinalEvaluationResponse(response string) *Par
 // fixCommonJSONIssues attempts to fix common JSON formatting issues
 func (e *Evaluator) fixCommonJSONIssues(response string) string {
 	fixed := response
-	
+
 	// Fix trailing commas
 	fixed = regexp.MustCompile(`,(\s*[}\]])`).ReplaceAllString(fixed, "$1")
-	
+
 	// Fix single quotes to double quotes
 	fixed = regexp.MustCompile(`'([^']*)'`).ReplaceAllString(fixed, `"$1"`)
-	
+
 	// Fix unquoted keys
 	fixed = regexp.MustCompile(`(\w+):`).ReplaceAllString(fixed, `"$1":`)
-	
+
 	// Fix true/false capitalization
 	fixed = regexp.MustCompile(`(?i)\btrue\b`).ReplaceAllString(fixed, "true")
 	fixed = regexp.MustCompile(`(?i)\bfalse\b`).ReplaceAllString(fixed, "false")
-	
+
 	return fixed
 }
 
@@ -573,14 +560,14 @@ func (e *Evaluator) extractJSONFromText(text string) string {
 	// Look for JSON objects starting with { and ending with }
 	jsonPattern := regexp.MustCompile(`\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}`)
 	matches := jsonPattern.FindAllString(text, -1)
-	
+
 	for _, match := range matches {
 		// Try to validate that this looks like a proper response
 		if strings.Contains(match, "score") || strings.Contains(match, "finalScore") {
 			return match
 		}
 	}
-	
+
 	return ""
 }
 
@@ -588,7 +575,7 @@ func (e *Evaluator) parseEvaluationResponse(response string) (*float64, string, 
 	// Clean the response first
 	cleanedResponse := e.cleanResponse(response)
 	e.logger.Debug("Parsing evaluation response: %s", cleanedResponse)
-	
+
 	// Try structured parsing with validation
 	if result := e.parseStructuredEvaluationResponse(cleanedResponse); result != nil {
 		return result.Score, result.Reason, result.Reasons
@@ -628,16 +615,16 @@ func (e *Evaluator) parseEvaluationResponse(response string) (*float64, string, 
 		reasonsStr := match[1]
 		reasonPattern := regexp.MustCompile(`"([^"]+)"`)
 		reasonMatches := reasonPattern.FindAllStringSubmatch(reasonsStr, -1)
-		
+
 		for _, m := range reasonMatches {
 			if len(m) > 1 {
 				reasons = append(reasons, strings.TrimSpace(m[1]))
 			}
 		}
-		
+
 		e.logger.Debug("Extracted %d reasons from array using regex: %v", len(reasons), reasons)
 	}
-	
+
 	// If we couldn't extract reasons array, try individual reason patterns
 	if len(reasons) == 0 {
 		// Multiple reason patterns
@@ -676,7 +663,7 @@ func (e *Evaluator) parseFinalEvaluationResponse(response string) (*float64, boo
 	// Clean the response first
 	cleanedResponse := e.cleanResponse(response)
 	e.logger.Debug("Parsing final evaluation response: %s", cleanedResponse)
-	
+
 	// Try structured parsing with validation
 	if result := e.parseStructuredFinalEvaluationResponse(cleanedResponse); result != nil {
 		return result.FinalScore, result.ShouldSendEmail, result.FinalReason, result.FinalReasons
@@ -739,16 +726,16 @@ func (e *Evaluator) parseFinalEvaluationResponse(response string) (*float64, boo
 		reasonsStr := match[1]
 		reasonPattern := regexp.MustCompile(`"([^"]+)"`)
 		reasonMatches := reasonPattern.FindAllStringSubmatch(reasonsStr, -1)
-		
+
 		for _, m := range reasonMatches {
 			if len(m) > 1 {
 				finalReasons = append(finalReasons, strings.TrimSpace(m[1]))
 			}
 		}
-		
+
 		e.logger.Debug("Extracted %d final reasons from array", len(finalReasons))
 	}
-	
+
 	// If we couldn't extract reasons array, try individual reason patterns
 	if len(finalReasons) == 0 {
 		// Multiple reason patterns
@@ -779,7 +766,7 @@ func (e *Evaluator) parseFinalEvaluationResponse(response string) (*float64, boo
 		finalReasons = []string{finalReason}
 	}
 
-	e.logger.Debug("Parsed - Final Score: %v, Should Send Email: %t, Reason: %s, Reasons: %v", 
+	e.logger.Debug("Parsed - Final Score: %v, Should Send Email: %t, Reason: %s, Reasons: %v",
 		finalScore, shouldSendEmail, finalReason, finalReasons)
 	return finalScore, shouldSendEmail, finalReason, finalReasons
 }
@@ -790,15 +777,15 @@ func (e *Evaluator) ValidateFinalEvaluation(job *models.Job) (bool, string, erro
 		return false, "No final score to validate", nil
 	}
 	prompt := e.getValidationPrompt(job)
-	response, err := e.groqClient.ChatCompletion(prompt, 256)
+	response, err := e.openAIClient.ChatCompletion(prompt, e.policy.Evaluation.MaxTokens.Validation)
 	if err != nil {
 		return false, "LLM validation error", err
 	}
-	
+
 	// Clean the response first to handle markdown code blocks
 	cleanedResponse := e.cleanResponse(response)
 	e.logger.Debug("Parsing validation response: %s", cleanedResponse)
-	
+
 	type ValidationResult struct {
 		Valid  bool   `json:"valid"`
 		Reason string `json:"reason"`
@@ -822,20 +809,25 @@ func (e *Evaluator) getValidationPrompt(job *models.Job) string {
 	if len(finalReasons) == 0 && job.FinalReason != "" {
 		finalReasons = []string{job.FinalReason}
 	}
-	
+
 	// Shortened CV for validation
-	shortCV := cleanCVForPrompt(cvText)
-	if len(shortCV) > 1000 {
-		shortCV = shortCV[:1000] + "..."
+	shortCV := cleanCVForPrompt(cvText, e.policy.Evaluation.CVPromptTruncation)
+	if len(shortCV) > e.policy.Evaluation.CVPromptTruncation.ValidationMaxSize {
+		shortCV = shortCV[:e.policy.Evaluation.CVPromptTruncation.ValidationMaxSize] + "..."
 	}
-	
-	return fmt.Sprintf(`Validate job recommendation. Check for: wrong field, seniority, German requirements, skill mismatch.
+	return renderTemplate(e.policy.Evaluation.ValidationPromptTemplate, map[string]string{
+		"CV":             shortCV,
+		"JOB_DESCRIPTION": job.JobDescription,
+		"FINAL_SCORE":    fmt.Sprintf("%.1f", finalScore),
+		"SHOULD_APPLY":   strconv.FormatBool(shouldApply),
+		"FINAL_REASONS":  fmt.Sprintf("%q", finalReasons),
+	})
+}
 
-CV: %s
-
-Job: %s
-Previous: score=%.1f, apply=%t, reasons=%q
-
-JSON only: {"valid": true/false, "reason": "brief"}`, 
-		shortCV, job.JobDescription, finalScore, shouldApply, finalReasons)
-} 
+func renderTemplate(template string, values map[string]string) string {
+	rendered := template
+	for key, value := range values {
+		rendered = strings.ReplaceAll(rendered, "{{"+key+"}}", value)
+	}
+	return rendered
+}

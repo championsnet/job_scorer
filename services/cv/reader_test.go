@@ -3,11 +3,15 @@ package cv
 import (
 	"strings"
 	"testing"
+
+	"job-scorer/config"
 )
 
 func TestCleanText(t *testing.T) {
-	reader := &CVReader{}
-	
+	reader := &CVReader{
+		policy: config.CVPolicy{MinValidTextLength: 40, MinLetterRatio: 0.40},
+	}
+
 	tests := []struct {
 		input    string
 		expected string
@@ -24,8 +28,12 @@ func TestCleanText(t *testing.T) {
 			input:    "Text with \x00\x01\x02 control chars",
 			expected: "Text with  control chars",
 		},
+		{
+			input:    "Résumé – Zürich\nΚαλημέρα",
+			expected: "Résumé – Zürich\nΚαλημέρα",
+		},
 	}
-	
+
 	for _, test := range tests {
 		result := reader.cleanText(test.input)
 		if result != test.expected {
@@ -35,14 +43,16 @@ func TestCleanText(t *testing.T) {
 }
 
 func TestIsValidText(t *testing.T) {
-	reader := &CVReader{}
-	
+	reader := &CVReader{
+		policy: config.CVPolicy{MinValidTextLength: 40, MinLetterRatio: 0.40},
+	}
+
 	// Debug test
 	testText := "Marketing and business development experience"
 	result := reader.isValidText(testText)
 	t.Logf("Testing text: %q, result: %t", testText, result)
 	t.Logf("Text length: %d", len(testText))
-	
+
 	// Debug the keyword matching
 	expectedKeywords := []string{"experience", "education", "skills", "work", "job", "company", "university", "degree", "marketing", "business", "development", "operations", "administration"}
 	lowerText := strings.ToLower(testText)
@@ -54,7 +64,7 @@ func TestIsValidText(t *testing.T) {
 		}
 	}
 	t.Logf("Total keywords found: %d", keywordCount)
-	
+
 	tests := []struct {
 		input    string
 		expected bool
@@ -72,15 +82,15 @@ func TestIsValidText(t *testing.T) {
 			expected: false,
 		},
 		{
-			input:    "This text is long enough but doesn't contain relevant keywords",
-			expected: false,
-		},
-		{
 			input:    "Garbled text: !:»³ùäýýB\"",
 			expected: false,
 		},
+		{
+			input:    "%%%% #### **** !!!! ???? //// ---- ++++ ==== ____ @@@@",
+			expected: false,
+		},
 	}
-	
+
 	for _, test := range tests {
 		result := reader.isValidText(test.input)
 		if result != test.expected {
@@ -90,27 +100,18 @@ func TestIsValidText(t *testing.T) {
 }
 
 func TestGetFallbackCV(t *testing.T) {
-	reader := &CVReader{}
+	reader := &CVReader{
+		policy: config.CVPolicy{
+			FallbackText: "Fallback CV text with skills and experience details for testing purposes.",
+		},
+	}
 	cv := reader.getFallbackCV()
-	
-	// Check that fallback CV contains expected sections
-	expectedSections := []string{
-		"Vasiliki Ploumistou",
-		"EDUCATION:",
-		"EXPERIENCE:",
-		"SKILLS:",
-		"CAREER OBJECTIVES:",
-		"PERSONAL:",
+
+	if !strings.Contains(cv, "Fallback CV text") {
+		t.Errorf("unexpected fallback CV: %s", cv)
 	}
-	
-	for _, section := range expectedSections {
-		if !strings.Contains(cv, section) {
-			t.Errorf("Fallback CV missing expected section: %s", section)
-		}
-	}
-	
-	// Check that it's not empty
-	if len(cv) < 100 {
+
+	if len(cv) < 20 {
 		t.Errorf("Fallback CV too short: %d characters", len(cv))
 	}
-} 
+}

@@ -15,18 +15,19 @@ import (
 	"job-scorer/utils"
 )
 
-type GroqClient struct {
+type OpenAIClient struct {
 	apiKey      string
 	model       string
+	baseURL     string
 	client      *http.Client
 	logger      *utils.Logger
-	rateLimiter  *utils.RateLimiter // Token-aware rate limiter
+	rateLimiter *utils.RateLimiter // Token-aware rate limiter
 }
 
-type GroqRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	MaxTokens int      `json:"max_tokens,omitempty"`
+type OpenAIRequest struct {
+	Model               string    `json:"model"`
+	Messages            []Message `json:"messages"`
+	MaxCompletionTokens int       `json:"max_completion_tokens,omitempty"`
 }
 
 type Message struct {
@@ -34,8 +35,8 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-type GroqResponse struct {
-	Choices []Choice `json:"choices"`
+type OpenAIResponse struct {
+	Choices []Choice  `json:"choices"`
 	Error   *APIError `json:"error,omitempty"`
 }
 
@@ -49,26 +50,27 @@ type APIError struct {
 	Code    string `json:"code"`
 }
 
-func NewGroqClient(cfg *config.Config, rateLimiter *utils.RateLimiter) *GroqClient {
-	return &GroqClient{
-		apiKey: cfg.Groq.APIKey,
-		model:  cfg.Groq.Model,
+func NewOpenAIClient(cfg *config.Config, rateLimiter *utils.RateLimiter) *OpenAIClient {
+	return &OpenAIClient{
+		apiKey:  cfg.OpenAI.APIKey,
+		model:   cfg.OpenAI.Model,
+		baseURL: cfg.OpenAI.BaseURL,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		logger:      utils.NewLogger("GroqClient"),
-		rateLimiter:  rateLimiter,
+		logger:      utils.NewLogger("LLMClient"),
+		rateLimiter: rateLimiter,
 	}
 }
 
-func (g *GroqClient) ChatCompletion(prompt string, maxTokens int) (string, error) {
+func (g *OpenAIClient) ChatCompletion(prompt string, maxTokens int) (string, error) {
 	if g.apiKey == "" {
-		return "", fmt.Errorf("Groq API key is not configured")
+		return "", fmt.Errorf("OpenAI API key is not configured")
 	}
 
 	// Estimate tokens with a conservative ratio (1 token ≈ 3 characters).
 	// This provides ~30% safety margin compared to the previous 4-char estimate
-	// and helps keep us below the real Groq TPM limit.
+	// and helps keep us below provider TPM limits.
 	estimatedPromptTokens := utf8.RuneCountInString(prompt) / 3
 	if estimatedPromptTokens < 1 {
 		estimatedPromptTokens = 1
@@ -85,7 +87,7 @@ func (g *GroqClient) ChatCompletion(prompt string, maxTokens int) (string, error
 	// Add a small delay between requests to be extra safe
 	time.Sleep(100 * time.Millisecond)
 
-	requestBody := GroqRequest{
+	requestBody := OpenAIRequest{
 		Model: g.model,
 		Messages: []Message{
 			{
@@ -93,7 +95,7 @@ func (g *GroqClient) ChatCompletion(prompt string, maxTokens int) (string, error
 				Content: prompt,
 			},
 		},
-		MaxTokens: maxTokens,
+		MaxCompletionTokens: maxTokens,
 	}
 
 	jsonData, err := json.Marshal(requestBody)
@@ -101,7 +103,7 @@ func (g *GroqClient) ChatCompletion(prompt string, maxTokens int) (string, error
 		return "", fmt.Errorf("error marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.groq.com/openai/v1/chat/completions", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", g.baseURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("error creating request: %w", err)
 	}
@@ -109,11 +111,11 @@ func (g *GroqClient) ChatCompletion(prompt string, maxTokens int) (string, error
 	req.Header.Set("Authorization", "Bearer "+g.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	// Making request to Groq API (debug output removed to reduce spam)
+	// Making request to LLM API (debug output removed to reduce spam)
 
 	resp, err := g.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("error making request to Groq API: %w", err)
+		return "", fmt.Errorf("error making request to LLM API: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -126,47 +128,56 @@ func (g *GroqClient) ChatCompletion(prompt string, maxTokens int) (string, error
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		g.logger.Error("Groq API error: HTTP %d: %s", resp.StatusCode, string(body))
+		g.logger.Error("LLM API error: HTTP %d: %s", resp.StatusCode, string(body))
 		return "", fmt.Errorf("API error: HTTP %d", resp.StatusCode)
 	}
 
-	var groqResp GroqResponse
-	if err := json.Unmarshal(body, &groqResp); err != nil {
+	var openAIResp OpenAIResponse
+	if err := json.Unmarshal(body, &openAIResp); err != nil {
 		return "", fmt.Errorf("error unmarshaling response: %w", err)
 	}
 
-	if groqResp.Error != nil {
-		return "", fmt.Errorf("API error: %s", groqResp.Error.Message)
+	if openAIResp.Error != nil {
+		return "", fmt.Errorf("API error: %s", openAIResp.Error.Message)
 	}
 
-	if len(groqResp.Choices) == 0 {
+	if len(openAIResp.Choices) == 0 {
 		return "", fmt.Errorf("no choices in response")
 	}
 
-	content := groqResp.Choices[0].Message.Content
+	content := openAIResp.Choices[0].Message.Content
 	return content, nil
 }
 
-// parseRateLimitHeaders parses Groq's rate limit headers and updates our rate limiter
-func (g *GroqClient) parseRateLimitHeaders(headers http.Header) {
+// parseRateLimitHeaders parses provider rate limit headers and updates our rate limiter
+func (g *OpenAIClient) parseRateLimitHeaders(headers http.Header) {
 	if g.rateLimiter == nil {
 		return
 	}
 
-	// Parse token-related headers
-	remainingTokens := headers.Get("x-ratelimit-remaining-tokens")
-	resetTokens := headers.Get("x-ratelimit-reset-tokens")
-	limitTokens := headers.Get("x-ratelimit-limit-tokens")
-	
+	// Parse token-related headers (OpenAI-compatible + legacy-compatible)
+	remainingTokens := firstHeaderValue(headers,
+		"x-ratelimit-remaining-tokens",
+		"x-ratelimit-remaining-tokens-minute",
+	)
+	resetTokens := firstHeaderValue(headers,
+		"x-ratelimit-reset-tokens",
+		"x-ratelimit-reset-tokens-minute",
+	)
+	limitTokens := firstHeaderValue(headers,
+		"x-ratelimit-limit-tokens",
+		"x-ratelimit-limit-tokens-minute",
+	)
+
 	// Log the current rate limit status
 	if remainingTokens != "" && limitTokens != "" {
 		if remaining, err := strconv.Atoi(remainingTokens); err == nil {
 			if limit, err := strconv.Atoi(limitTokens); err == nil {
-				g.logger.Info("🔢 Groq tokens: %d/%d remaining", remaining, limit)
-				
+				g.logger.Info("🔢 LLM tokens: %d/%d remaining", remaining, limit)
+
 				// Update our rate limiter with actual server state
-				g.rateLimiter.UpdateFromHeaders(remaining, 0)
-				
+				g.rateLimiter.UpdateFromHeaders(remaining, limit)
+
 				if remaining < 1000 { // If we're running low on tokens
 					if resetDuration := g.parseResetDuration(resetTokens); resetDuration > 0 {
 						g.logger.Info("🚨 Low tokens remaining (%d). Waiting %v for reset...", remaining, resetDuration.Round(time.Second))
@@ -178,12 +189,15 @@ func (g *GroqClient) parseRateLimitHeaders(headers http.Header) {
 	}
 
 	// Parse request-related headers
-	remainingRequests := headers.Get("x-ratelimit-remaining-requests")
+	remainingRequests := firstHeaderValue(headers,
+		"x-ratelimit-remaining-requests",
+		"x-ratelimit-remaining-requests-minute",
+	)
 	if remainingRequests != "" {
 		if remaining, err := strconv.Atoi(remainingRequests); err == nil {
-			g.logger.Info("📝 Groq requests: %d remaining today", remaining)
+			g.logger.Info("📝 LLM requests remaining: %d", remaining)
 			if remaining < 100 {
-				g.logger.Warning("⚠️ Very low requests remaining for today: %d", remaining)
+				g.logger.Warning("⚠️ Very low requests remaining: %d", remaining)
 			}
 		}
 	}
@@ -198,26 +212,26 @@ func (g *GroqClient) parseRateLimitHeaders(headers http.Header) {
 	}
 }
 
-// parseResetDuration parses Groq's reset duration format (e.g., "7.66s", "2m59.56s")
-func (g *GroqClient) parseResetDuration(resetStr string) time.Duration {
+// parseResetDuration parses reset duration format (e.g., "7.66s", "2m59.56s")
+func (g *OpenAIClient) parseResetDuration(resetStr string) time.Duration {
 	resetStr = strings.TrimSpace(resetStr)
-	
+
 	// Handle formats like "7.66s" or "2m59.56s"
 	if duration, err := time.ParseDuration(resetStr); err == nil {
 		return duration
 	}
-	
+
 	// If parsing fails, try to extract seconds from the end
 	if strings.HasSuffix(resetStr, "s") {
 		if seconds, err := strconv.ParseFloat(resetStr[:len(resetStr)-1], 64); err == nil {
 			return time.Duration(seconds * float64(time.Second))
 		}
 	}
-	
+
 	return 0
 }
 
-func (g *GroqClient) IsConfigured() bool {
+func (g *OpenAIClient) IsConfigured() bool {
 	return g.apiKey != ""
 }
 
@@ -226,4 +240,13 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-} 
+}
+
+func firstHeaderValue(headers http.Header, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(headers.Get(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}

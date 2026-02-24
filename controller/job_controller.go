@@ -18,28 +18,28 @@ import (
 )
 
 type JobController struct {
-	config         *config.Config
-	scraper        *scraper.LinkedInScraper
-	filter         *filter.Filter
-	evaluator      *evaluator.Evaluator
-	cvReader       *cv.CVReader
-	notifier       *notification.EmailNotifier
-	storage        storage.JobStorage
-	checkpoint     storage.CheckpointStorage
-	jobTracker     storage.JobTrackerInterface
-	rateLimiter    *utils.RateLimiter
-	logger         *utils.Logger
-	gcsStorage     *storage.GCSStorage // Optional GCS storage
+	config      *config.Config
+	scraper     *scraper.LinkedInScraper
+	filter      *filter.Filter
+	evaluator   *evaluator.Evaluator
+	cvReader    *cv.CVReader
+	notifier    *notification.EmailNotifier
+	storage     storage.JobStorage
+	checkpoint  storage.CheckpointStorage
+	jobTracker  storage.JobTrackerInterface
+	rateLimiter *utils.RateLimiter
+	logger      *utils.Logger
+	gcsStorage  *storage.GCSStorage // Optional GCS storage
 }
 
 func NewJobController(cfg *config.Config) (*JobController, error) {
 	// Create log directory
 	logDir := filepath.Join(cfg.App.DataDir, "logs")
-	
+
 	// Initialize GCS storage if enabled
 	var gcsStorage *storage.GCSStorage
 	var sharedLogger *utils.Logger
-	
+
 	if cfg.GCS.Enabled {
 		var err error
 		gcsStorage, err = storage.NewGCSStorage(storage.GCSConfig{
@@ -75,7 +75,7 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 	if cfg.GCS.Enabled && gcsStorage != nil && gcsStorage.IsEnabled() {
 		// Use GCS storage services
 		jobStorage = storage.NewGCSFileStorage(gcsStorage)
-		
+
 		gcsCheckpointService, err := storage.NewGCSCheckpointService(gcsStorage)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create GCS checkpoint service: %w", err)
@@ -110,13 +110,13 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 	}
 
 	// Initialize services with shared logger
-	linkedInScraper := scraper.NewLinkedInScraper()
-	filterService := filter.NewFilter(sharedLogger)
-	cvReader := cv.NewCVReader(cfg.App.CVPath)
+	linkedInScraper := scraper.NewLinkedInScraper(cfg.Policy.Scraper)
+	filterService := filter.NewFilter(cfg.Policy.Filters, cfg.Policy.Notification, sharedLogger)
+	cvReader := cv.NewCVReader(cfg.App.CVPath, cfg.Policy.CV)
 	notifier := notification.NewEmailNotifier(cfg)
 
-	// Token-aware rate limiter for Groq
-	// Based on Groq's actual limits from headers:
+	// Token-aware rate limiter for LLM provider
+	// Based on conservative API limits:
 	// - 14400 requests per day = 10 requests per minute (conservative)
 	// - 18000 tokens per minute (using 17000 for safety margin)
 	tokenRateLimiter := utils.NewTokenRateLimiter(
@@ -126,9 +126,9 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 		time.Minute,
 	)
 
-	// Initialize Groq client and evaluator with shared logger
-	groqClient := evaluator.NewGroqClient(cfg, tokenRateLimiter)
-	evaluatorService := evaluator.NewEvaluator(groqClient, cvReader, linkedInScraper, tokenRateLimiter, sharedLogger)
+	// Initialize LLM client and evaluator with shared logger
+	openAIClient := evaluator.NewOpenAIClient(cfg, tokenRateLimiter)
+	evaluatorService := evaluator.NewEvaluator(openAIClient, cvReader, linkedInScraper, tokenRateLimiter, cfg.Policy, sharedLogger)
 
 	// Ensure output directory exists
 	if err := jobStorage.EnsureOutputDir(); err != nil {
@@ -187,7 +187,7 @@ func (jc *JobController) SearchAndFilterJobs() error {
 	newJobs := jc.jobTracker.FilterProcessedJobs(allJobs)
 	processedCount := len(allJobs) - len(newJobs)
 	jc.logger.PipelineResult("DUPLICATE FILTERING", len(allJobs), len(newJobs), fmt.Sprintf("(%d duplicates removed)", processedCount))
-	
+
 	if processedCount > 0 {
 		jc.logger.JobDetail("Skipped %d already processed jobs", processedCount)
 	}
@@ -197,7 +197,7 @@ func (jc *JobController) SearchAndFilterJobs() error {
 	prefilteredJobs := jc.filter.PrefilterJobs(newJobs)
 	filteredOutCount := len(newJobs) - len(prefilteredJobs)
 	jc.logger.PipelineResult("PREFILTERING", len(newJobs), len(prefilteredJobs), fmt.Sprintf("(%d filtered out)", filteredOutCount))
-	
+
 	// Log details of filtered out jobs
 	if filteredOutCount > 0 {
 		jc.logFilteredJobs(newJobs, prefilteredJobs)
@@ -226,7 +226,7 @@ func (jc *JobController) SearchAndFilterJobs() error {
 	if err != nil {
 		return fmt.Errorf("failed to evaluate jobs: %w", err)
 	}
-	
+
 	successCount := jc.countSuccessfulEvaluations(evaluatedJobs)
 	jc.logger.PipelineResult("LLM EVALUATION", len(prefilteredJobs), successCount, "successfully scored")
 	jc.logEvaluationSummary("Initial Evaluation", evaluatedJobs)
@@ -236,8 +236,8 @@ func (jc *JobController) SearchAndFilterJobs() error {
 	}
 
 	// STEP 5: FILTER PROMISING JOBS
-	jc.logger.PipelineStart("PROMISING FILTER", "Selecting jobs with score >= 5.0 for detailed evaluation")
-	promisingJobs := jc.filter.FilterPromisingJobs(evaluatedJobs, 5.0)
+	jc.logger.PipelineStart("PROMISING FILTER", "Selecting jobs with policy score threshold for detailed evaluation")
+	promisingJobs := jc.filter.FilterPromisingJobs(evaluatedJobs, jc.config.Policy.Pipeline.PromisingScoreThreshold)
 	jc.logger.PipelineResult("PROMISING FILTER", len(evaluatedJobs), len(promisingJobs), "passed initial threshold")
 	jc.logJobSummary("Promising Jobs", promisingJobs)
 
@@ -254,7 +254,7 @@ func (jc *JobController) SearchAndFilterJobs() error {
 	if err != nil {
 		return fmt.Errorf("failed to perform CV evaluation: %w", err)
 	}
-	
+
 	finalSuccessCount := jc.countSuccessfulFinalEvaluations(finalEvaluatedJobs)
 	jc.logger.PipelineResult("CV MATCHING", len(promisingJobs), finalSuccessCount, "with final recommendations")
 	jc.logFinalEvaluationSummary("CV-Based Evaluation", finalEvaluatedJobs)
@@ -277,16 +277,15 @@ func (jc *JobController) SearchAndFilterJobs() error {
 
 	// STEP 7.5: LLM VALIDATION (TWO-STAGE) - Optional
 	var validatedNotificationJobs []*models.Job
-	if jc.config.App.EnableFinalValidation {
+	if jc.config.Policy.Pipeline.EnableFinalValidation {
 		jc.logger.PipelineStart("LLM VALIDATION", "Validating notification jobs with second LLM pass")
 		var validationRejected int
-		redFlagPhrases := []string{
-			"german required", "fluency in german", "fluent german", "deutsch erforderlich", "job description not available", "not available", "german is required", "german language requirement", "german as a requirement", "german as primary language",
-		}
+		redFlagPhrases := jc.config.Policy.Pipeline.RedFlagPhrases
 		for _, job := range notificationJobs {
 			// Programmatic rejection: missing/placeholder description
 			desc := strings.ToLower(strings.TrimSpace(job.JobDescription))
-			if desc == "" || desc == "job description not available" || desc == "not available" {
+			if (jc.config.Policy.Pipeline.RejectEmptyDescriptions && desc == "") ||
+				(jc.config.Policy.Pipeline.RejectPlaceholderDescription && (desc == "job description not available" || desc == "not available")) {
 				validationRejected++
 				jc.logger.JobDetail("❌ Programmatic validation rejected: %s at %s (Reason: missing or placeholder job description)", job.Position, job.Company)
 				continue
@@ -363,7 +362,7 @@ func (jc *JobController) SearchAndFilterJobs() error {
 	jc.logger.Info("   • Final Recommendations: %d jobs", finalSuccessCount)
 	jc.logger.Info("   • Email Notifications: %d jobs", len(validatedNotificationJobs))
 	jc.logger.Info("")
-	
+
 	return nil
 }
 
@@ -378,7 +377,7 @@ func (jc *JobController) fetchJobsFromAllLocations() ([]*models.Job, error) {
 
 		options := scraper.QueryOptions{
 			Location:        location,
-			DateSincePosted: "past hour",
+			DateSincePosted: jc.config.Policy.Scraper.DateSincePosted,
 			Limit:           jc.config.App.MaxJobs,
 		}
 
@@ -403,7 +402,7 @@ func (jc *JobController) fetchJobsFromAllLocations() ([]*models.Job, error) {
 			uniqueJobs = append(uniqueJobs, job)
 		}
 
-		jc.logger.JobDetail("✅ Found %d unique jobs from location %s (filtered %d duplicates)", 
+		jc.logger.JobDetail("✅ Found %d unique jobs from location %s (filtered %d duplicates)",
 			len(uniqueJobs), location, duplicateCount)
 		allJobs = append(allJobs, uniqueJobs...)
 	}
@@ -424,10 +423,10 @@ func (jc *JobController) evaluateJobsWithRateLimit(jobs []*models.Job) ([]*model
 	}
 
 	// Use batch processing for initial evaluations (3 jobs at a time)
-	batchSize := 3
-	
+	batchSize := jc.config.Policy.Pipeline.BatchSize
+
 	// If we have a small number of jobs, fall back to individual processing
-	if len(jobs) <= 5 {
+	if len(jobs) <= jc.config.Policy.Pipeline.IndividualFallbackMaxJobs {
 		return jc.evaluateJobsIndividually(jobs)
 	}
 
@@ -529,7 +528,7 @@ func (jc *JobController) evaluateJobsWithCV(jobs []*models.Job) ([]*models.Job, 
 		}
 	}
 
-	jc.logger.Info("CV evaluation completed: %d jobs evaluated, %d marked for email notification", 
+	jc.logger.Info("CV evaluation completed: %d jobs evaluated, %d marked for email notification",
 		len(finalEvaluatedJobs), emailJobsCount)
 
 	return finalEvaluatedJobs, nil
@@ -551,7 +550,7 @@ func (jc *JobController) GetStats() map[string]interface{} {
 	stats["config"] = map[string]interface{}{
 		"locations":       jc.config.App.Locations,
 		"cron_schedule":   jc.config.App.CronSchedule,
-		"groq_configured": jc.config.Groq.APIKey != "",
+		"llm_configured":  jc.config.OpenAI.APIKey != "",
 		"smtp_configured": jc.notifier.IsConfigured(),
 		"cv_loaded":       jc.cvReader.IsLoaded(),
 	}
@@ -567,7 +566,7 @@ func (jc *JobController) logJobSummary(title string, jobs []*models.Job) {
 	if len(jobs) == 0 {
 		return
 	}
-	
+
 	jc.logger.JobDetail("%s (%d total):", title, len(jobs))
 	for i, job := range jobs {
 		if i >= 5 { // Limit to first 5 jobs to avoid spam
@@ -582,19 +581,19 @@ func (jc *JobController) logFilteredJobs(originalJobs, filteredJobs []*models.Jo
 	// Find jobs that were filtered out
 	filteredOut := make([]*models.Job, 0)
 	filteredMap := make(map[string]bool)
-	
+
 	for _, job := range filteredJobs {
 		if job.JobID != "" {
 			filteredMap[job.JobID] = true
 		}
 	}
-	
+
 	for _, job := range originalJobs {
 		if job.JobID != "" && !filteredMap[job.JobID] {
 			filteredOut = append(filteredOut, job)
 		}
 	}
-	
+
 	if len(filteredOut) > 0 {
 		jc.logger.JobDetail("Filtered out jobs:")
 		for i, job := range filteredOut {
@@ -611,11 +610,11 @@ func (jc *JobController) logEvaluationSummary(title string, jobs []*models.Job) 
 	if len(jobs) == 0 {
 		return
 	}
-	
+
 	scoreRanges := map[string]int{
 		"9-10": 0, "7-8": 0, "5-6": 0, "3-4": 0, "1-2": 0, "0": 0, "failed": 0,
 	}
-	
+
 	for _, job := range jobs {
 		if job.Score == nil {
 			scoreRanges["failed"]++
@@ -637,7 +636,7 @@ func (jc *JobController) logEvaluationSummary(title string, jobs []*models.Job) 
 			}
 		}
 	}
-	
+
 	jc.logger.JobDetail("%s Score Distribution:", title)
 	jc.logger.JobDetail("  🟢 Excellent (9-10): %d jobs", scoreRanges["9-10"])
 	jc.logger.JobDetail("  🟡 Good (7-8): %d jobs", scoreRanges["7-8"])
@@ -654,11 +653,11 @@ func (jc *JobController) logFinalEvaluationSummary(title string, jobs []*models.
 	if len(jobs) == 0 {
 		return
 	}
-	
+
 	recommendedCount := 0
 	notRecommendedCount := 0
 	failedCount := 0
-	
+
 	jc.logger.JobDetail("%s Results:", title)
 	for _, job := range jobs {
 		if job.FinalScore == nil {
@@ -670,8 +669,8 @@ func (jc *JobController) logFinalEvaluationSummary(title string, jobs []*models.
 			notRecommendedCount++
 		}
 	}
-	
-	jc.logger.JobDetail("Summary: %d recommended, %d not recommended, %d failed", 
+
+	jc.logger.JobDetail("Summary: %d recommended, %d not recommended, %d failed",
 		recommendedCount, notRecommendedCount, failedCount)
 }
 
@@ -693,4 +692,4 @@ func (jc *JobController) countSuccessfulFinalEvaluations(jobs []*models.Job) int
 		}
 	}
 	return count
-} 
+}

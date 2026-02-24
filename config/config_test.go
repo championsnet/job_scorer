@@ -9,13 +9,18 @@ import (
 func TestLoad(t *testing.T) {
 	// Save original environment
 	originalEnv := map[string]string{
-		"GROQ_API_KEY":             os.Getenv("GROQ_API_KEY"),
-		"GROQ_MODEL":               os.Getenv("GROQ_MODEL"),
-		"SMTP_HOST":                os.Getenv("SMTP_HOST"),
-		"SMTP_PORT":                os.Getenv("SMTP_PORT"),
-		"JOB_LOCATIONS":            os.Getenv("JOB_LOCATIONS"),
-		"CRON_SCHEDULE":            os.Getenv("CRON_SCHEDULE"),
-		"MAX_REQUESTS_PER_MINUTE":  os.Getenv("MAX_REQUESTS_PER_MINUTE"),
+		"OPENAI_API_KEY":          os.Getenv("OPENAI_API_KEY"),
+		"OPENAI_MODEL":            os.Getenv("OPENAI_MODEL"),
+		"OPENAI_BASE_URL":         os.Getenv("OPENAI_BASE_URL"),
+		"GROQ_API_KEY":            os.Getenv("GROQ_API_KEY"),
+		"GROQ_MODEL":              os.Getenv("GROQ_MODEL"),
+		"SMTP_HOST":               os.Getenv("SMTP_HOST"),
+		"SMTP_PORT":               os.Getenv("SMTP_PORT"),
+		"JOB_LOCATIONS":           os.Getenv("JOB_LOCATIONS"),
+		"CRON_SCHEDULE":           os.Getenv("CRON_SCHEDULE"),
+		"MAX_REQUESTS_PER_MINUTE": os.Getenv("MAX_REQUESTS_PER_MINUTE"),
+		"POLICY_CONFIG_PATH":      os.Getenv("POLICY_CONFIG_PATH"),
+		"CV_PATH":                 os.Getenv("CV_PATH"),
 	}
 
 	// Clean up after test
@@ -37,13 +42,18 @@ func TestLoad(t *testing.T) {
 		{
 			name: "Default configuration",
 			envVars: map[string]string{
-				"GROQ_API_KEY": "",
-				"GROQ_MODEL":   "",
+				"OPENAI_API_KEY": "",
+				"OPENAI_MODEL":   "",
+				"GROQ_API_KEY":   "",
+				"GROQ_MODEL":     "",
+				"POLICY_CONFIG_PATH": "",
+				"CV_PATH":        "",
 			},
 			want: &Config{
-				Groq: GroqConfig{
-					APIKey: "",
-					Model:  "gemma2-9b-it",
+				OpenAI: OpenAIConfig{
+					APIKey:  "",
+					Model:   "gpt-5.2",
+					BaseURL: "https://api.openai.com/v1/chat/completions",
 				},
 				SMTP: SMTPConfig{
 					Host:         "",
@@ -71,8 +81,11 @@ func TestLoad(t *testing.T) {
 		{
 			name: "Custom configuration",
 			envVars: map[string]string{
-				"GROQ_API_KEY":            "test-api-key",
-				"GROQ_MODEL":              "custom-model",
+				"OPENAI_API_KEY":          "test-openai-key",
+				"OPENAI_MODEL":            "gpt-5.2",
+				"OPENAI_BASE_URL":         "https://api.openai.com/v1/chat/completions",
+				"GROQ_API_KEY":            "legacy-groq-key",
+				"GROQ_MODEL":              "legacy-model",
 				"SMTP_HOST":               "smtp.test.com",
 				"SMTP_PORT":               "465",
 				"SMTP_SECURE":             "true",
@@ -80,11 +93,14 @@ func TestLoad(t *testing.T) {
 				"CRON_SCHEDULE":           "0 9 * * *",
 				"RUN_ON_STARTUP":          "false",
 				"MAX_REQUESTS_PER_MINUTE": "60",
+				"POLICY_CONFIG_PATH":      "",
+				"CV_PATH":                 "",
 			},
 			want: &Config{
-				Groq: GroqConfig{
-					APIKey: "test-api-key",
-					Model:  "custom-model",
+				OpenAI: OpenAIConfig{
+					APIKey:  "test-openai-key",
+					Model:   "gpt-5.2",
+					BaseURL: "https://api.openai.com/v1/chat/completions",
 				},
 				SMTP: SMTPConfig{
 					Host:   "smtp.test.com",
@@ -122,11 +138,14 @@ func TestLoad(t *testing.T) {
 			}
 
 			// Check individual fields
-			if got.Groq.APIKey != tt.want.Groq.APIKey {
-				t.Errorf("Groq.APIKey = %v, want %v", got.Groq.APIKey, tt.want.Groq.APIKey)
+			if got.OpenAI.APIKey != tt.want.OpenAI.APIKey {
+				t.Errorf("OpenAI.APIKey = %v, want %v", got.OpenAI.APIKey, tt.want.OpenAI.APIKey)
 			}
-			if got.Groq.Model != tt.want.Groq.Model {
-				t.Errorf("Groq.Model = %v, want %v", got.Groq.Model, tt.want.Groq.Model)
+			if got.OpenAI.Model != tt.want.OpenAI.Model {
+				t.Errorf("OpenAI.Model = %v, want %v", got.OpenAI.Model, tt.want.OpenAI.Model)
+			}
+			if got.OpenAI.BaseURL != tt.want.OpenAI.BaseURL {
+				t.Errorf("OpenAI.BaseURL = %v, want %v", got.OpenAI.BaseURL, tt.want.OpenAI.BaseURL)
 			}
 			if got.SMTP.Host != tt.want.SMTP.Host {
 				t.Errorf("SMTP.Host = %v, want %v", got.SMTP.Host, tt.want.SMTP.Host)
@@ -262,4 +281,4 @@ func TestGetEnvBool(t *testing.T) {
 			}
 		})
 	}
-} 
+}

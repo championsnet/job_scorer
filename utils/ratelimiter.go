@@ -14,9 +14,9 @@ type RateLimiter struct {
 	logger      *Logger
 
 	// Token-based limiting
-	tokenLimit      int           // Max tokens per window
-	tokenWindow     time.Duration // Usually 1 minute
-	tokensUsed      int
+	tokenLimit       int           // Max tokens per window
+	tokenWindow      time.Duration // Usually 1 minute
+	tokensUsed       int
 	tokenWindowStart time.Time
 }
 
@@ -57,14 +57,14 @@ func (rl *RateLimiter) Acquire() error {
 	if len(rl.requests) >= rl.maxRequests {
 		oldestRequest := rl.requests[0]
 		waitTime := rl.timeWindow - now.Sub(oldestRequest) + 200*time.Millisecond // Add 200ms buffer
-		
+
 		rl.logger.Info("Rate limit reached. Waiting %v before next request...", waitTime.Round(time.Second))
-		
+
 		// Release the lock before sleeping
 		rl.mutex.Unlock()
 		time.Sleep(waitTime)
 		rl.mutex.Lock()
-		
+
 		// Recursively try again after waiting
 		return rl.acquire()
 	}
@@ -77,11 +77,11 @@ func (rl *RateLimiter) Acquire() error {
 // AcquireTokens blocks until enough tokens are available for the request
 func (rl *RateLimiter) AcquireTokens(tokens int) error {
 	maxRetries := 3 // Prevent infinite loops
-	
+
 	for retry := 0; retry < maxRetries; retry++ {
 		rl.mutex.Lock()
 		now := time.Now()
-		
+
 		// Reset token window if needed
 		if rl.tokenWindowStart.IsZero() || now.Sub(rl.tokenWindowStart) >= rl.tokenWindow {
 			rl.tokenWindowStart = now
@@ -106,7 +106,7 @@ func (rl *RateLimiter) AcquireTokens(tokens int) error {
 		// Calculate wait time until next window
 		timeIntoWindow := now.Sub(rl.tokenWindowStart)
 		waitTime := rl.tokenWindow - timeIntoWindow + 200*time.Millisecond
-		
+
 		if waitTime <= 0 {
 			// Window should have reset, try again immediately
 			rl.logger.Warning("⚠️ Negative wait time calculated, resetting window")
@@ -116,15 +116,15 @@ func (rl *RateLimiter) AcquireTokens(tokens int) error {
 			continue
 		}
 
-		rl.logger.Info("🛑 Token limit reached (%d/%d). Waiting %v for window reset...", 
+		rl.logger.Info("🛑 Token limit reached (%d/%d). Waiting %v for window reset...",
 			rl.tokensUsed, rl.tokenLimit, waitTime.Round(time.Second))
-		
+
 		rl.mutex.Unlock()
 		time.Sleep(waitTime)
-		
+
 		// After waiting, the next iteration will reset the window and try again
 	}
-	
+
 	return fmt.Errorf("token rate limiter failed after %d retries", maxRetries)
 }
 
@@ -145,13 +145,13 @@ func (rl *RateLimiter) acquire() error {
 	if len(rl.requests) >= rl.maxRequests {
 		oldestRequest := rl.requests[0]
 		waitTime := rl.timeWindow - now.Sub(oldestRequest) + 200*time.Millisecond
-		
+
 		rl.logger.Info("Rate limit still reached. Waiting %v more...", waitTime.Round(time.Second))
-		
+
 		rl.mutex.Unlock()
 		time.Sleep(waitTime)
 		rl.mutex.Lock()
-		
+
 		return rl.acquire()
 	}
 
@@ -163,7 +163,7 @@ func (rl *RateLimiter) acquire() error {
 func (rl *RateLimiter) GetStats() (int, int, int, int) {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
-	
+
 	now := time.Now()
 	activeRequests := 0
 	for _, requestTime := range rl.requests {
@@ -186,23 +186,40 @@ func (rl *RateLimiter) HandleRetryAfter(seconds int) {
 	if seconds <= 0 {
 		return
 	}
-	
+
 	waitTime := time.Duration(seconds) * time.Second
 	rl.logger.Info("🚫 Server requested retry-after: %d seconds. Waiting %v...", seconds, waitTime)
 	time.Sleep(waitTime)
 }
 
-// UpdateFromHeaders updates rate limiter state based on server response headers
-func (rl *RateLimiter) UpdateFromHeaders(remainingTokens, resetTokensSeconds int) {
+// UpdateFromHeaders updates limiter state when header units align with local policy.
+func (rl *RateLimiter) UpdateFromHeaders(remainingTokens, headerTokenLimit int) {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
-	
-	if remainingTokens >= 0 && rl.tokenLimit > 0 {
-		rl.tokensUsed = rl.tokenLimit - remainingTokens
-		rl.logger.Info("📊 Updated from headers: %d/%d tokens used", rl.tokensUsed, rl.tokenLimit)
-		
-		if remainingTokens < 500 { // Very low on tokens
-			rl.logger.Warning("⚠️ Very low tokens remaining: %d", remainingTokens)
-		}
+
+	if remainingTokens < 0 || rl.tokenLimit <= 0 {
+		return
 	}
-} 
+
+	// If provider headers are in a very different scale than our local limit policy,
+	// don't overwrite internal counters with incompatible units.
+	if headerTokenLimit > 0 && headerTokenLimit > rl.tokenLimit*5 {
+		rl.logger.Info("📊 Header token limits (%d) differ from local policy (%d); keeping local limiter state", headerTokenLimit, rl.tokenLimit)
+		return
+	}
+
+	tokensUsed := rl.tokenLimit - remainingTokens
+	if tokensUsed < 0 {
+		tokensUsed = 0
+	}
+	if tokensUsed > rl.tokenLimit {
+		tokensUsed = rl.tokenLimit
+	}
+
+	rl.tokensUsed = tokensUsed
+	rl.logger.Info("📊 Updated from headers: %d/%d tokens used", rl.tokensUsed, rl.tokenLimit)
+
+	if remainingTokens < 500 { // Very low on tokens
+		rl.logger.Warning("⚠️ Very low tokens remaining: %d", remainingTokens)
+	}
+}
