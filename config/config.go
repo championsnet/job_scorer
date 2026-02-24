@@ -14,6 +14,7 @@ type Config struct {
 	SMTP      SMTPConfig
 	App       AppConfig
 	RateLimit RateLimitConfig
+	GCS       GCSConfig
 }
 
 type GroqConfig struct {
@@ -32,19 +33,27 @@ type SMTPConfig struct {
 }
 
 type AppConfig struct {
-	Locations      []string
-	CronSchedule   string
-	RunOnStartup   bool
-	CVPath         string
-	DataDir        string
-	OutputDir      string
-	MaxJobs        int
+	Locations             []string
+	CronSchedule          string
+	RunOnStartup          bool
+	CVPath                string
+	DataDir               string
+	OutputDir             string
+	MaxJobs               int
+	EnableFinalValidation bool
 }
 
 type RateLimitConfig struct {
 	MaxRequests        int           `json:"maxRequests"`
 	TimeWindow         time.Duration `json:"timeWindow"`
 	MaxTokensPerMinute int           `json:"maxTokensPerMinute"` // Groq: 6000 TPM (using 5800 for safety)
+}
+
+type GCSConfig struct {
+	BucketName    string `json:"bucketName"`
+	ProjectID     string `json:"projectId"`
+	Enabled       bool   `json:"enabled"`
+	FallbackDir   string `json:"fallbackDir"`
 }
 
 func Load() (*Config, error) {
@@ -66,18 +75,25 @@ func Load() (*Config, error) {
 			ToRecipients: strings.Split(getEnv("SMTP_TO", ""), ","),
 		},
 		App: AppConfig{
-			Locations:    strings.Split(getEnv("JOB_LOCATIONS", "90009885,90009888"), ","),
-			CronSchedule: getEnv("CRON_SCHEDULE", "0 */1 * * *"),
-			RunOnStartup: getEnvBool("RUN_ON_STARTUP", true),
-			CVPath:       getEnv("CV_PATH", "CV_Vasiliki Ploumistou_22_05.pdf"),
-			DataDir:      getEnv("DATA_DIR", "data"),
-			OutputDir:    getEnv("OUTPUT_DIR", "."),
-			MaxJobs:      getEnvInt("MAX_JOBS_PER_LOCATION", 1000),
+			Locations:             strings.Split(getEnv("JOB_LOCATIONS", "90009885,90009888"), ","),
+			CronSchedule:          getEnv("CRON_SCHEDULE", "0 */1 * * *"),
+			RunOnStartup:          getEnvBool("RUN_ON_STARTUP", true),
+			CVPath:                getEnv("CV_PATH", "CV_Vasiliki Ploumistou_22_05.pdf"),
+			DataDir:               getEnv("DATA_DIR", "data"),
+			OutputDir:             getEnv("OUTPUT_DIR", "."),
+			MaxJobs:               getEnvInt("MAX_JOBS_PER_LOCATION", 1000),
+			EnableFinalValidation: getEnvBool("ENABLE_FINAL_VALIDATION", true),
 		},
 		RateLimit: RateLimitConfig{
 			MaxRequests: getEnvInt("MAX_REQUESTS_PER_MINUTE", 20),
 			TimeWindow:  time.Minute,
 			MaxTokensPerMinute: getEnvInt("MAX_TOKENS_PER_MINUTE", 5000),
+		},
+		GCS: GCSConfig{
+			BucketName:  getEnv("GCS_BUCKET_NAME", ""),
+			ProjectID:   getEnv("GCS_PROJECT_ID", ""),
+			Enabled:     getEnvBool("GCS_ENABLED", false),
+			FallbackDir: getEnv("GCS_FALLBACK_DIR", "gcs_fallback"),
 		},
 	}
 

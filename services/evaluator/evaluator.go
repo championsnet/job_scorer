@@ -149,132 +149,173 @@ func (e *Evaluator) EvaluateJobWithCV(job *models.Job) (*models.Job, error) {
 	return job, nil
 }
 
-func (e *Evaluator) getInitialPrompt(job *models.Job) string {
-  system := `You are an expert AI Career Advisor specializing in entry-level job matching for EU candidates in Switzerland.
+// BatchEvaluateJobs evaluates multiple jobs in a single LLM call for efficiency
+func (e *Evaluator) BatchEvaluateJobs(jobs []*models.Job, batchSize int) ([]*models.Job, error) {
+	if len(jobs) == 0 {
+		return jobs, nil
+	}
 
-CRITICAL: Respond with ONLY valid JSON in this exact format:
-{
-  "score": int,         // 0 (worst) to 10 (best)
-  "recommend": bool,    // true if candidate should apply
-  "reasons": [string]   // list of 1-2 specific rationale bullets
+	var evaluatedJobs []*models.Job
+	errorCount := 0
+
+	// Process jobs in batches
+	for i := 0; i < len(jobs); i += batchSize {
+		end := i + batchSize
+		if end > len(jobs) {
+			end = len(jobs)
+		}
+		
+		batch := jobs[i:end]
+		e.logger.Progress(i+1, len(jobs), "Batch evaluating jobs %d-%d", i+1, end)
+
+		// Apply rate limiting before API call
+		if err := e.rateLimiter.Acquire(); err != nil {
+			return nil, fmt.Errorf("rate limiter error: %w", err)
+		}
+
+		batchPrompt := e.getBatchInitialPrompt(batch)
+		response, err := e.groqClient.ChatCompletion(batchPrompt, 512) // Increased tokens for batch
+		if err != nil {
+			errorCount++
+			e.logger.Error("Batch evaluation failed for jobs %d-%d: %v", i+1, end, err)
+			// Fall back to individual evaluation for this batch
+			individualResults := e.fallbackToIndividualEvaluation(batch)
+			evaluatedJobs = append(evaluatedJobs, individualResults...)
+			continue
+		}
+
+		// Parse batch response
+		batchResults := e.parseBatchEvaluationResponse(response, batch)
+		evaluatedJobs = append(evaluatedJobs, batchResults...)
+	}
+
+	if errorCount > 0 {
+		e.logger.Warning("⚠️  %d batch evaluation errors encountered", errorCount)
+	}
+
+	return evaluatedJobs, nil
 }
 
-EVALUATION CRITERIA (in order of importance):
-   
-1. FIELD FIT (CRITICAL):
-   - GOOD FITS: Marketing, Business Development, Operations, Administrative, Customer Success, Generalist, Strategy, HR
-   - BAD FITS: Software Engineering, Data Science, Finance, Legal, Medical
-   - If technical role (engineer, developer, scientist) → Score = 0-3
-   
-2. SENIORITY LEVEL (HIGH):
-   - PERFECT: Entry-level, junior, intern, graduate, trainee, assistant
-   - ACCEPTABLE: "up to 2 years", "0-3 years experience", "manager"
-   - BAD: Senior, Lead, Director, "5+ years", "experienced"
+// getBatchInitialPrompt creates a prompt for evaluating multiple jobs at once
+func (e *Evaluator) getBatchInitialPrompt(jobs []*models.Job) string {
+	jobsText := ""
+	for i, job := range jobs {
+		jobsText += fmt.Sprintf(`Job %d: "%s" at %s (%s)
+`, i+1, job.Position, job.Company, job.Location)
+	}
 
-SCORING GUIDE:
-- 9-10: Perfect match (right field, entry-level, good location)
-- 7-8: Good match (minor issues)
-- 5-6: Acceptable (some concerns)
-- 3-4: Poor match (major issues)
-- 0-2: Bad match (wrong field, senior role)`
-  
-  user := fmt.Sprintf(`CANDIDATE PROFILE:
-- Citizenship: EU (Greek passport)
-- Target Locations: Basel, Zurich, remote, commutable
-- Skills: Marketing, Business Development, Operations, Administrative work, Generalist, Strategy, HR
-- Experience Level: Entry-level/Junior (0-2 years)
+	return fmt.Sprintf(`Rate jobs 0-10 for EU candidate (Basel/Zurich, entry-level).
 
-JOB TO EVALUATE:
-- Title: %s
-- Company: %s
-- Location: %s
+GOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR
+BAD FIELDS: Engineering, Data Science, Finance, Legal, Medical
+GOOD LEVEL: Entry, Junior, Intern, Graduate, Trainee, Assistant  
+BAD LEVEL: Senior, Lead, Director, 5+ years
 
-ANALYZE THIS JOB POSTING CAREFULLY:
-1. Determine if the role fits marketing/BD/ops/admin/generalist/strategy/HR fields
-2. Assess if location is suitable for Basel/Zurich area or remote/commutable
-3. Evaluate if it's appropriate for entry-level candidate
+%s
+Respond with JSON array:
+[{"jobId": 1, "score": X, "recommend": true/false, "reasons": ["brief reason"]}, ...]`, jobsText)
+}
 
-RESPOND WITH JSON ONLY.`, job.Position, job.Company, job.Location)
+// parseBatchEvaluationResponse parses responses for multiple jobs
+func (e *Evaluator) parseBatchEvaluationResponse(response string, jobs []*models.Job) []*models.Job {
+	cleanedResponse := e.cleanResponse(response)
+	e.logger.Debug("Parsing batch evaluation response: %s", cleanedResponse)
 
-  return system + "\n\n" + user
+	// Try to parse as JSON array
+	type batchEvalResp struct {
+		JobId     int      `json:"jobId"`
+		Score     float64  `json:"score"`
+		Recommend bool     `json:"recommend"`
+		Reasons   []string `json:"reasons"`
+	}
+
+	var batchResults []batchEvalResp
+	if err := json.Unmarshal([]byte(cleanedResponse), &batchResults); err == nil {
+		// Successfully parsed batch response
+		resultMap := make(map[int]*batchEvalResp)
+		for i := range batchResults {
+			resultMap[batchResults[i].JobId] = &batchResults[i]
+		}
+
+		var evaluatedJobs []*models.Job
+		for i, job := range jobs {
+			jobIndex := i + 1 // 1-based indexing in prompt
+			if result, exists := resultMap[jobIndex]; exists {
+				// Apply the result to the job
+				job.Score = &result.Score
+				if len(result.Reasons) > 0 {
+					job.Reason = result.Reasons[0]
+					job.Reasons = result.Reasons
+				} else {
+					job.Reason = "No reason provided."
+					job.Reasons = []string{"No reason provided."}
+				}
+				e.logger.JobDetail("✅ Batch scored %.1f: %s at %s", result.Score, job.Position, job.Company)
+			} else {
+				// No result found for this job
+				e.logger.Warning("No batch result found for job %d", jobIndex)
+				job.Score = nil
+				job.Reason = "Batch evaluation failed."
+				job.Reasons = []string{"Batch evaluation failed."}
+			}
+			evaluatedJobs = append(evaluatedJobs, job)
+		}
+
+		e.logger.Debug("Successfully parsed batch response for %d jobs", len(jobs))
+		return evaluatedJobs
+	}
+
+	// Fallback: treat as single job response for the first job
+	e.logger.Debug("Batch parsing failed, falling back to individual parsing")
+	return e.fallbackToIndividualEvaluation(jobs)
+}
+
+// fallbackToIndividualEvaluation evaluates jobs individually when batch fails
+func (e *Evaluator) fallbackToIndividualEvaluation(jobs []*models.Job) []*models.Job {
+	var evaluatedJobs []*models.Job
+	for _, job := range jobs {
+		// Apply a simple evaluation or mark as failed
+		job.Score = nil
+		job.Reason = "Batch evaluation failed, individual evaluation not performed."
+		job.Reasons = []string{"Batch evaluation failed, individual evaluation not performed."}
+		evaluatedJobs = append(evaluatedJobs, job)
+	}
+	return evaluatedJobs
+}
+
+func (e *Evaluator) getInitialPrompt(job *models.Job) string {
+  return fmt.Sprintf(`Rate job 0-10 for EU candidate (Basel/Zurich, entry-level).
+
+GOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR
+BAD FIELDS: Engineering, Data Science, Finance, Legal, Medical
+GOOD LEVEL: Entry, Junior, Intern, Graduate, Trainee, Assistant  
+BAD LEVEL: Senior, Lead, Director, 5+ years
+
+Job: "%s" at %s (%s)
+
+Respond JSON only:
+{"score": X, "recommend": true/false, "reasons": ["brief reason"]}`, 
+    job.Position, job.Company, job.Location)
 }
 
 func (e *Evaluator) getFinalPrompt(job *models.Job, jobDesc, cv string) string {
-  system := `You are an expert AI Career Advisor performing a detailed CV vs Job match analysis.
-
-CRITICAL: Respond with ONLY valid JSON in this exact format:
-{
-  "finalScore": int,    // 0 (worst) to 10 (best)
-  "shouldApply": bool,  // true if candidate should apply (score > 5)
-  "reasons": [string]   // list of 1–3 specific rationale bullets
-}
-
-CV MATCHING CRITERIA (in order of importance):
-
-1. LANGUAGE REQUIREMENT (CRITICAL - Score 0 if German required):
-   - Scan job description for German language fluency requirements (or any other non-english language requirements)
-   - RED FLAGS: "German required", "Deutsch erforderlich", "DACH", "German native", "Fluent German", "{non-english language} required"
-   - If German required → finalScore = 0, shouldApply = false
-   
-2. SKILL MATCH (CRITICAL):
-   - Look for specific skills in CV that match job requirements
-   - Marketing skills: digital marketing, content creation, social media
-   - Business Development: sales, partnerships, client relations, growth
-   - Operations: project management, process improvement, coordination
-   - Administrative: office management, data entry, executive support, contract management, logistics
-   - Strategy: business strategy, market research, competitive analysis, business development, business planning
-   - Business Support: business support, business operations, business administration, business management, business development, business planning, communications
-   
-3. EXPERIENCE LEVEL (HIGH):
-   - CV shows 0-2 years experience → Perfect for entry-level roles
-   - If job requires 3+ years → Score -2
-   - If job requires 5+ years → Score -5
-   
-4. LOCATION & PERMIT (HIGH):
-   - EU citizen can work in Switzerland
-   - Basel/Zurich area or remote work
-   - If location is far → Score -2
-   
-5. CAREER GROWTH POTENTIAL (MEDIUM):
-   - Learning opportunities, mentorship, career progression
-   - If role is dead-end → Score -1
-   
-6. COMPANY REPUTATION (MEDIUM):
-   - Established vs startup/unknown company
-   - Industry reputation and stability
-
-SCORING GUIDE:
-- 9-10: Perfect CV match (skills align, right level, good location)
-- 7-8: Good CV match (minor skill gaps)
-- 5-6: Acceptable CV match (some skill gaps)
-- 3-4: Poor CV match (major skill gaps)
-- 0-2: Bad CV match (German/Non-english language required, wrong skills, senior role)
-
-IMPORTANT: If job description contains German language requirements, immediately return finalScore=0 and shouldApply=false.`
-
-  // Clean and truncate CV for better processing
   cleanCV := cleanCVForPrompt(cv)
   
-  user := fmt.Sprintf(`CANDIDATE CV:
+  return fmt.Sprintf(`CV vs Job match analysis (0-10).
+
+RED FLAGS (score=0): German required, Deutsch erforderlich, non-English fluency
+MATCH: Skills, experience level (0-2yrs), Basel/Zurich location
+SKILLS: Marketing, Business Dev, Operations, Admin, Strategy, HR
+
+CV:
 %s
 
-JOB DETAILS:
-- Title: %s
-- Company: %s
-- Location: %s
-- Description: %s
+Job: "%s" at %s (%s)
+Description: %s
 
-PERFORM DETAILED CV ANALYSIS:
-1. Check for German language and any other non-english language requirements in job description
-2. Compare CV skills with job requirements
-3. Assess experience level compatibility
-4. Evaluate location and permit requirements
-5. Consider career growth potential
-6. Analyze company fit
-
-RESPOND WITH JSON ONLY.`, cleanCV, job.Position, job.Company, job.Location, jobDesc)
-
-  return system + "\n\n" + user
+JSON only:
+{"finalScore": X, "shouldApply": true/false, "reasons": ["key reason"]}`, 
+    cleanCV, job.Position, job.Company, job.Location, jobDesc)
 }
 
 // Helper function to clean CV text
@@ -298,14 +339,14 @@ func cleanCVForPrompt(cv string) string {
 }
 
 func (e *Evaluator) cleanResponse(response string) string {
-	// Remove markdown code blocks (```json ... ```)
-	codeBlockPattern := regexp.MustCompile(`\x60{3}json\s*\n?(.*?)\n?\x60{3}`)
+	// Remove markdown code blocks (```json ... ```) - enable multiline matching with (?s)
+	codeBlockPattern := regexp.MustCompile(`(?s)\x60{3}json\s*\n?(.*?)\n?\x60{3}`)
 	if match := codeBlockPattern.FindStringSubmatch(response); len(match) > 1 {
 		return strings.TrimSpace(match[1])
 	}
 	
-	// Remove regular code blocks (``` ... ```)
-	codeBlockPattern2 := regexp.MustCompile(`\x60{3}\s*\n?(.*?)\n?\x60{3}`)
+	// Remove regular code blocks (``` ... ```) - enable multiline matching with (?s)
+	codeBlockPattern2 := regexp.MustCompile(`(?s)\x60{3}\s*\n?(.*?)\n?\x60{3}`)
 	if match := codeBlockPattern2.FindStringSubmatch(response); len(match) > 1 {
 		return strings.TrimSpace(match[1])
 	}
@@ -313,33 +354,244 @@ func (e *Evaluator) cleanResponse(response string) string {
 	return strings.TrimSpace(response)
 }
 
+// Structured response types with validation
+type EvaluationResponse struct {
+	Score     float64  `json:"score"`
+	Recommend bool     `json:"recommend"`
+	Reasons   []string `json:"reasons"`
+}
+
+type FinalEvaluationResponse struct {
+	FinalScore  float64  `json:"finalScore"`
+	ShouldApply bool     `json:"shouldApply"`
+	Reasons     []string `json:"reasons"`
+}
+
+type ParsedEvaluationResult struct {
+	Score   *float64
+	Reason  string
+	Reasons []string
+}
+
+type ParsedFinalEvaluationResult struct {
+	FinalScore      *float64
+	ShouldSendEmail bool
+	FinalReason     string
+	FinalReasons    []string
+}
+
+// validateEvaluationResponse validates the structure and content of evaluation response
+func (e *Evaluator) validateEvaluationResponse(resp *EvaluationResponse) error {
+	if resp.Score < 0 || resp.Score > 10 {
+		return fmt.Errorf("score must be between 0 and 10, got %.2f", resp.Score)
+	}
+	if len(resp.Reasons) == 0 {
+		return fmt.Errorf("reasons array cannot be empty")
+	}
+	if len(resp.Reasons) > 5 {
+		return fmt.Errorf("too many reasons (max 5), got %d", len(resp.Reasons))
+	}
+	for _, reason := range resp.Reasons {
+		if len(strings.TrimSpace(reason)) < 5 {
+			return fmt.Errorf("reason too short: '%s'", reason)
+		}
+	}
+	return nil
+}
+
+// validateFinalEvaluationResponse validates the structure and content of final evaluation response
+func (e *Evaluator) validateFinalEvaluationResponse(resp *FinalEvaluationResponse) error {
+	if resp.FinalScore < 0 || resp.FinalScore > 10 {
+		return fmt.Errorf("finalScore must be between 0 and 10, got %.2f", resp.FinalScore)
+	}
+	if len(resp.Reasons) == 0 {
+		return fmt.Errorf("reasons array cannot be empty")
+	}
+	if len(resp.Reasons) > 5 {
+		return fmt.Errorf("too many reasons (max 5), got %d", len(resp.Reasons))
+	}
+	for _, reason := range resp.Reasons {
+		if len(strings.TrimSpace(reason)) < 5 {
+			return fmt.Errorf("reason too short: '%s'", reason)
+		}
+	}
+	return nil
+}
+
+// parseStructuredEvaluationResponse attempts to parse with validation and fallbacks
+func (e *Evaluator) parseStructuredEvaluationResponse(response string) *ParsedEvaluationResult {
+	// Attempt 1: Direct JSON parsing
+	var evalResp EvaluationResponse
+	if err := json.Unmarshal([]byte(response), &evalResp); err == nil {
+		if validateErr := e.validateEvaluationResponse(&evalResp); validateErr == nil {
+			e.logger.Debug("Successfully parsed and validated JSON evaluation response")
+			reason := "No reason provided."
+			if len(evalResp.Reasons) > 0 {
+				reason = evalResp.Reasons[0]
+			}
+			return &ParsedEvaluationResult{
+				Score:   &evalResp.Score,
+				Reason:  reason,
+				Reasons: evalResp.Reasons,
+			}
+		} else {
+			e.logger.Debug("JSON parsed but validation failed: %v", validateErr)
+		}
+	}
+
+	// Attempt 2: Try fixing common JSON issues
+	fixedResponse := e.fixCommonJSONIssues(response)
+	if fixedResponse != response {
+		var evalResp EvaluationResponse
+		if err := json.Unmarshal([]byte(fixedResponse), &evalResp); err == nil {
+			if validateErr := e.validateEvaluationResponse(&evalResp); validateErr == nil {
+				e.logger.Debug("Successfully parsed fixed JSON evaluation response")
+				reason := "No reason provided."
+				if len(evalResp.Reasons) > 0 {
+					reason = evalResp.Reasons[0]
+				}
+				return &ParsedEvaluationResult{
+					Score:   &evalResp.Score,
+					Reason:  reason,
+					Reasons: evalResp.Reasons,
+				}
+			}
+		}
+	}
+
+	// Attempt 3: Extract JSON from markdown or other wrappers
+	if extractedJSON := e.extractJSONFromText(response); extractedJSON != "" {
+		var evalResp EvaluationResponse
+		if err := json.Unmarshal([]byte(extractedJSON), &evalResp); err == nil {
+			if validateErr := e.validateEvaluationResponse(&evalResp); validateErr == nil {
+				e.logger.Debug("Successfully parsed extracted JSON evaluation response")
+				reason := "No reason provided."
+				if len(evalResp.Reasons) > 0 {
+					reason = evalResp.Reasons[0]
+				}
+				return &ParsedEvaluationResult{
+					Score:   &evalResp.Score,
+					Reason:  reason,
+					Reasons: evalResp.Reasons,
+				}
+			}
+		}
+	}
+
+	e.logger.Debug("All structured parsing attempts failed, falling back to regex")
+	return nil
+}
+
+// parseStructuredFinalEvaluationResponse attempts to parse final evaluation with validation
+func (e *Evaluator) parseStructuredFinalEvaluationResponse(response string) *ParsedFinalEvaluationResult {
+	// Attempt 1: Direct JSON parsing
+	var finalResp FinalEvaluationResponse
+	if err := json.Unmarshal([]byte(response), &finalResp); err == nil {
+		if validateErr := e.validateFinalEvaluationResponse(&finalResp); validateErr == nil {
+			e.logger.Debug("Successfully parsed and validated JSON final evaluation response")
+			reason := "No reason provided."
+			if len(finalResp.Reasons) > 0 {
+				reason = finalResp.Reasons[0]
+			}
+			return &ParsedFinalEvaluationResult{
+				FinalScore:      &finalResp.FinalScore,
+				ShouldSendEmail: finalResp.ShouldApply,
+				FinalReason:     reason,
+				FinalReasons:    finalResp.Reasons,
+			}
+		} else {
+			e.logger.Debug("JSON parsed but validation failed: %v", validateErr)
+		}
+	}
+
+	// Apply the same fixing and extraction logic as evaluation response
+	fixedResponse := e.fixCommonJSONIssues(response)
+	if fixedResponse != response {
+		var finalResp FinalEvaluationResponse
+		if err := json.Unmarshal([]byte(fixedResponse), &finalResp); err == nil {
+			if validateErr := e.validateFinalEvaluationResponse(&finalResp); validateErr == nil {
+				e.logger.Debug("Successfully parsed fixed JSON final evaluation response")
+				reason := "No reason provided."
+				if len(finalResp.Reasons) > 0 {
+					reason = finalResp.Reasons[0]
+				}
+				return &ParsedFinalEvaluationResult{
+					FinalScore:      &finalResp.FinalScore,
+					ShouldSendEmail: finalResp.ShouldApply,
+					FinalReason:     reason,
+					FinalReasons:    finalResp.Reasons,
+				}
+			}
+		}
+	}
+
+	if extractedJSON := e.extractJSONFromText(response); extractedJSON != "" {
+		var finalResp FinalEvaluationResponse
+		if err := json.Unmarshal([]byte(extractedJSON), &finalResp); err == nil {
+			if validateErr := e.validateFinalEvaluationResponse(&finalResp); validateErr == nil {
+				e.logger.Debug("Successfully parsed extracted JSON final evaluation response")
+				reason := "No reason provided."
+				if len(finalResp.Reasons) > 0 {
+					reason = finalResp.Reasons[0]
+				}
+				return &ParsedFinalEvaluationResult{
+					FinalScore:      &finalResp.FinalScore,
+					ShouldSendEmail: finalResp.ShouldApply,
+					FinalReason:     reason,
+					FinalReasons:    finalResp.Reasons,
+				}
+			}
+		}
+	}
+
+	e.logger.Debug("All structured final parsing attempts failed, falling back to regex")
+	return nil
+}
+
+// fixCommonJSONIssues attempts to fix common JSON formatting issues
+func (e *Evaluator) fixCommonJSONIssues(response string) string {
+	fixed := response
+	
+	// Fix trailing commas
+	fixed = regexp.MustCompile(`,(\s*[}\]])`).ReplaceAllString(fixed, "$1")
+	
+	// Fix single quotes to double quotes
+	fixed = regexp.MustCompile(`'([^']*)'`).ReplaceAllString(fixed, `"$1"`)
+	
+	// Fix unquoted keys
+	fixed = regexp.MustCompile(`(\w+):`).ReplaceAllString(fixed, `"$1":`)
+	
+	// Fix true/false capitalization
+	fixed = regexp.MustCompile(`(?i)\btrue\b`).ReplaceAllString(fixed, "true")
+	fixed = regexp.MustCompile(`(?i)\bfalse\b`).ReplaceAllString(fixed, "false")
+	
+	return fixed
+}
+
+// extractJSONFromText tries to find JSON objects within the text
+func (e *Evaluator) extractJSONFromText(text string) string {
+	// Look for JSON objects starting with { and ending with }
+	jsonPattern := regexp.MustCompile(`\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}`)
+	matches := jsonPattern.FindAllString(text, -1)
+	
+	for _, match := range matches {
+		// Try to validate that this looks like a proper response
+		if strings.Contains(match, "score") || strings.Contains(match, "finalScore") {
+			return match
+		}
+	}
+	
+	return ""
+}
+
 func (e *Evaluator) parseEvaluationResponse(response string) (*float64, string, []string) {
 	// Clean the response first
 	cleanedResponse := e.cleanResponse(response)
 	e.logger.Debug("Parsing evaluation response: %s", cleanedResponse)
 	
-	// Try to parse as JSON first (keep as fallback)
-	type evalResp struct {
-		Score     float64  `json:"score"`
-		Recommend bool     `json:"recommend"`
-		Reasons   []string `json:"reasons"`
-	}
-	var parsed evalResp
-	if err := json.Unmarshal([]byte(cleanedResponse), &parsed); err == nil {
-		reason := "No reason provided."
-		var reasons []string = parsed.Reasons
-		
-		if len(reasons) > 0 {
-			reason = reasons[0] // For backward compatibility
-			e.logger.Debug("Successfully parsed JSON response with %d reasons: %v", len(reasons), reasons)
-		} else {
-			reasons = []string{reason}
-			e.logger.Debug("JSON parsed but no reasons found")
-		}
-		
-		return &parsed.Score, reason, reasons
-	} else {
-		e.logger.Debug("JSON parsing failed: %v", err)
+	// Try structured parsing with validation
+	if result := e.parseStructuredEvaluationResponse(cleanedResponse); result != nil {
+		return result.Score, result.Reason, result.Reasons
 	}
 
 	// Enhanced regex parsing for various formats
@@ -425,25 +677,9 @@ func (e *Evaluator) parseFinalEvaluationResponse(response string) (*float64, boo
 	cleanedResponse := e.cleanResponse(response)
 	e.logger.Debug("Parsing final evaluation response: %s", cleanedResponse)
 	
-	// Try to parse as JSON first (keep as fallback)
-	type finalResp struct {
-		FinalScore   float64  `json:"finalScore"`
-		ShouldApply  bool     `json:"shouldApply"`
-		Reasons      []string `json:"reasons"`
-	}
-	var parsed finalResp
-	if err := json.Unmarshal([]byte(cleanedResponse), &parsed); err == nil {
-		reason := "No reason provided."
-		var reasons []string = parsed.Reasons
-		
-		if len(reasons) > 0 {
-			reason = reasons[0] // For backward compatibility
-			e.logger.Debug("Successfully parsed JSON response with %d reasons", len(reasons))
-		} else {
-			reasons = []string{reason}
-		}
-		
-		return &parsed.FinalScore, parsed.ShouldApply, reason, reasons
+	// Try structured parsing with validation
+	if result := e.parseStructuredFinalEvaluationResponse(cleanedResponse); result != nil {
+		return result.FinalScore, result.ShouldSendEmail, result.FinalReason, result.FinalReasons
 	}
 
 	// Enhanced regex parsing for final evaluation
@@ -558,13 +794,19 @@ func (e *Evaluator) ValidateFinalEvaluation(job *models.Job) (bool, string, erro
 	if err != nil {
 		return false, "LLM validation error", err
 	}
+	
+	// Clean the response first to handle markdown code blocks
+	cleanedResponse := e.cleanResponse(response)
+	e.logger.Debug("Parsing validation response: %s", cleanedResponse)
+	
 	type ValidationResult struct {
 		Valid  bool   `json:"valid"`
 		Reason string `json:"reason"`
 	}
 	var result ValidationResult
-	if err := json.Unmarshal([]byte(response), &result); err != nil {
-		return false, "Failed to parse LLM validation", err
+	if err := json.Unmarshal([]byte(cleanedResponse), &result); err != nil {
+		e.logger.Debug("Validation JSON parsing failed: %v", err)
+		return true, "Failed to parse LLM validation", err
 	}
 	return result.Valid, result.Reason, nil
 }
@@ -580,26 +822,20 @@ func (e *Evaluator) getValidationPrompt(job *models.Job) string {
 	if len(finalReasons) == 0 && job.FinalReason != "" {
 		finalReasons = []string{job.FinalReason}
 	}
-	return fmt.Sprintf(`
-You are a critical reviewer for an AI job-matching system. Your task is to validate the following job recommendation for accuracy and relevance.
+	
+	// Shortened CV for validation
+	shortCV := cleanCVForPrompt(cvText)
+	if len(shortCV) > 1000 {
+		shortCV = shortCV[:1000] + "..."
+	}
+	
+	return fmt.Sprintf(`Validate job recommendation. Check for: wrong field, seniority, German requirements, skill mismatch.
 
-CANDIDATE CV:
-%s
+CV: %s
 
-JOB DESCRIPTION:
-%s
+Job: %s
+Previous: score=%.1f, apply=%t, reasons=%q
 
-PREVIOUS AI EVALUATION:
-{
-  "finalScore": %.1f,
-  "shouldApply": %t,
-  "reasons": %q
-}
-
-INSTRUCTIONS:
-- Double-check if the finalScore and shouldApply are justified.
-- If the job is not a good fit (wrong field, seniority, language, or skill mismatch), set "valid" to false.
-- If the recommendation is correct, set "valid" to true.
-- Respond with ONLY valid JSON: { "valid": true/false, "reason": "..." }
-`, cvText, job.JobDescription, finalScore, shouldApply, finalReasons)
+JSON only: {"valid": true/false, "reason": "brief"}`, 
+		shortCV, job.JobDescription, finalScore, shouldApply, finalReasons)
 } 

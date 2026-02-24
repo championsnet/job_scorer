@@ -24,34 +24,89 @@ type JobController struct {
 	evaluator      *evaluator.Evaluator
 	cvReader       *cv.CVReader
 	notifier       *notification.EmailNotifier
-	storage        *storage.FileStorage
-	checkpoint     *storage.CheckpointService
-	jobTracker     *storage.JobTracker
+	storage        storage.JobStorage
+	checkpoint     storage.CheckpointStorage
+	jobTracker     storage.JobTrackerInterface
 	rateLimiter    *utils.RateLimiter
 	logger         *utils.Logger
+	gcsStorage     *storage.GCSStorage // Optional GCS storage
 }
 
 func NewJobController(cfg *config.Config) (*JobController, error) {
 	// Create log directory
 	logDir := filepath.Join(cfg.App.DataDir, "logs")
 	
-	// Create shared file logger for all services
-	sharedLogger, err := utils.NewFileLogger("JobScorer", logDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create shared logger: %w", err)
+	// Initialize GCS storage if enabled
+	var gcsStorage *storage.GCSStorage
+	var sharedLogger *utils.Logger
+	
+	if cfg.GCS.Enabled {
+		var err error
+		gcsStorage, err = storage.NewGCSStorage(storage.GCSConfig{
+			BucketName:  cfg.GCS.BucketName,
+			ProjectID:   cfg.GCS.ProjectID,
+			Enabled:     cfg.GCS.Enabled,
+			FallbackDir: cfg.GCS.FallbackDir,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GCS storage: %w", err)
+		}
+
+		// Create GCS-enabled logger
+		gcsLogger, err := utils.NewGCSFileLogger("JobScorer", logDir, gcsStorage, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GCS logger: %w", err)
+		}
+		sharedLogger = gcsLogger.Logger
+	} else {
+		// Create regular file logger
+		var err error
+		sharedLogger, err = utils.NewFileLogger("JobScorer", logDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create shared logger: %w", err)
+		}
 	}
 
-	// Create checkpoint service
-	checkpointDir := filepath.Join(cfg.App.DataDir, "checkpoints")
-	checkpointService, err := storage.NewCheckpointService(checkpointDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create checkpoint service: %w", err)
-	}
+	// Create storage services (GCS or local)
+	var jobStorage storage.JobStorage
+	var checkpointService storage.CheckpointStorage
+	var jobTracker storage.JobTrackerInterface
 
-	// Create job tracker
-	jobTracker, err := storage.NewJobTracker(cfg.App.DataDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create job tracker: %w", err)
+	if cfg.GCS.Enabled && gcsStorage != nil && gcsStorage.IsEnabled() {
+		// Use GCS storage services
+		jobStorage = storage.NewGCSFileStorage(gcsStorage)
+		
+		gcsCheckpointService, err := storage.NewGCSCheckpointService(gcsStorage)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GCS checkpoint service: %w", err)
+		}
+		checkpointService = gcsCheckpointService
+
+		gcsJobTracker, err := storage.NewGCSJobTracker(gcsStorage)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GCS job tracker: %w", err)
+		}
+		jobTracker = gcsJobTracker
+
+		sharedLogger.Info("Using Google Cloud Storage for data persistence")
+	} else {
+		// Use local storage services
+		jobStorage = storage.NewFileStorage(cfg.App.OutputDir)
+
+		checkpointDir := filepath.Join(cfg.App.DataDir, "checkpoints")
+		localCheckpointService, err := storage.NewCheckpointService(checkpointDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create checkpoint service: %w", err)
+		}
+		checkpointService = localCheckpointService
+
+		localJobTracker, err := storage.NewJobTracker(cfg.App.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create job tracker: %w", err)
+		}
+		jobTracker = localJobTracker
+
+		sharedLogger.Info("Using local file storage for data persistence")
 	}
 
 	// Initialize services with shared logger
@@ -59,7 +114,6 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 	filterService := filter.NewFilter(sharedLogger)
 	cvReader := cv.NewCVReader(cfg.App.CVPath)
 	notifier := notification.NewEmailNotifier(cfg)
-	storageService := storage.NewFileStorage(cfg.App.OutputDir)
 
 	// Token-aware rate limiter for Groq
 	// Based on Groq's actual limits from headers:
@@ -77,7 +131,7 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 	evaluatorService := evaluator.NewEvaluator(groqClient, cvReader, linkedInScraper, tokenRateLimiter, sharedLogger)
 
 	// Ensure output directory exists
-	if err := storageService.EnsureOutputDir(); err != nil {
+	if err := jobStorage.EnsureOutputDir(); err != nil {
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
 	}
 
@@ -88,11 +142,12 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 		evaluator:   evaluatorService,
 		cvReader:    cvReader,
 		notifier:    notifier,
-		storage:     storageService,
+		storage:     jobStorage,
 		checkpoint:  checkpointService,
 		jobTracker:  jobTracker,
 		rateLimiter: tokenRateLimiter,
 		logger:      sharedLogger,
+		gcsStorage:  gcsStorage,
 	}
 
 	return controller, nil
@@ -220,54 +275,60 @@ func (jc *JobController) SearchAndFilterJobs() error {
 		jc.logger.Error("Failed to save notification jobs checkpoint: %v", err)
 	}
 
-	// STEP 7.5: LLM VALIDATION (TWO-STAGE)
-	jc.logger.PipelineStart("LLM VALIDATION", "Validating notification jobs with second LLM pass")
+	// STEP 7.5: LLM VALIDATION (TWO-STAGE) - Optional
 	var validatedNotificationJobs []*models.Job
-	var validationRejected int
-	redFlagPhrases := []string{
-		"german required", "fluency in german", "fluent german", "deutsch erforderlich", "job description not available", "not available", "german is required", "german language requirement", "german as a requirement", "german as primary language",
-	}
-	for _, job := range notificationJobs {
-		// Programmatic rejection: missing/placeholder description
-		desc := strings.ToLower(strings.TrimSpace(job.JobDescription))
-		if desc == "" || desc == "job description not available" || desc == "not available" {
-			validationRejected++
-			jc.logger.JobDetail("❌ Programmatic validation rejected: %s at %s (Reason: missing or placeholder job description)", job.Position, job.Company)
-			continue
+	if jc.config.App.EnableFinalValidation {
+		jc.logger.PipelineStart("LLM VALIDATION", "Validating notification jobs with second LLM pass")
+		var validationRejected int
+		redFlagPhrases := []string{
+			"german required", "fluency in german", "fluent german", "deutsch erforderlich", "job description not available", "not available", "german is required", "german language requirement", "german as a requirement", "german as primary language",
 		}
+		for _, job := range notificationJobs {
+			// Programmatic rejection: missing/placeholder description
+			desc := strings.ToLower(strings.TrimSpace(job.JobDescription))
+			if desc == "" || desc == "job description not available" || desc == "not available" {
+				validationRejected++
+				jc.logger.JobDetail("❌ Programmatic validation rejected: %s at %s (Reason: missing or placeholder job description)", job.Position, job.Company)
+				continue
+			}
 
-		valid, reason, err := jc.evaluator.ValidateFinalEvaluation(job)
-		if err != nil {
-			jc.logger.Warning("LLM validation failed for %s at %s: %v", job.Position, job.Company, err)
-			continue
-		}
+			valid, reason, err := jc.evaluator.ValidateFinalEvaluation(job)
+			if err != nil {
+				jc.logger.Warning("LLM validation failed for %s at %s: %v", job.Position, job.Company, err)
+				continue
+			}
 
-		// Programmatic rejection: red-flag phrases in LLM reason
-		reasonLower := strings.ToLower(reason)
-		flagged := false
-		for _, phrase := range redFlagPhrases {
-			if strings.Contains(reasonLower, phrase) {
-				flagged = true
-				break
+			// Programmatic rejection: red-flag phrases in LLM reason
+			reasonLower := strings.ToLower(reason)
+			flagged := false
+			for _, phrase := range redFlagPhrases {
+				if strings.Contains(reasonLower, phrase) {
+					flagged = true
+					break
+				}
+			}
+			if flagged {
+				validationRejected++
+				jc.logger.JobDetail("❌ Programmatic validation rejected: %s at %s (Reason: red-flag in LLM reason: %s)", job.Position, job.Company, reason)
+				continue
+			}
+
+			if valid {
+				validatedNotificationJobs = append(validatedNotificationJobs, job)
+				jc.logger.JobDetail("✅ LLM validation passed: %s at %s (Reason: %s)", job.Position, job.Company, reason)
+			} else {
+				validationRejected++
+				jc.logger.JobDetail("❌ LLM validation rejected: %s at %s (Reason: %s)", job.Position, job.Company, reason)
 			}
 		}
-		if flagged {
-			validationRejected++
-			jc.logger.JobDetail("❌ Programmatic validation rejected: %s at %s (Reason: red-flag in LLM reason: %s)", job.Position, job.Company, reason)
-			continue
+		jc.logger.PipelineResult("LLM VALIDATION", len(notificationJobs), len(validatedNotificationJobs), "passed validation")
+		if validationRejected > 0 {
+			jc.logger.Warning("%d jobs rejected by LLM validation", validationRejected)
 		}
-
-		if valid {
-			validatedNotificationJobs = append(validatedNotificationJobs, job)
-			jc.logger.JobDetail("✅ LLM validation passed: %s at %s (Reason: %s)", job.Position, job.Company, reason)
-		} else {
-			validationRejected++
-			jc.logger.JobDetail("❌ LLM validation rejected: %s at %s (Reason: %s)", job.Position, job.Company, reason)
-		}
-	}
-	jc.logger.PipelineResult("LLM VALIDATION", len(notificationJobs), len(validatedNotificationJobs), "passed validation")
-	if validationRejected > 0 {
-		jc.logger.Warning("%d jobs rejected by LLM validation", validationRejected)
+	} else {
+		// Skip LLM validation - use all notification jobs
+		validatedNotificationJobs = notificationJobs
+		jc.logger.Info("LLM validation disabled - proceeding with all %d notification jobs", len(notificationJobs))
 	}
 
 	// STEP 8: SEND NOTIFICATIONS
@@ -317,7 +378,7 @@ func (jc *JobController) fetchJobsFromAllLocations() ([]*models.Job, error) {
 
 		options := scraper.QueryOptions{
 			Location:        location,
-			DateSincePosted: "past 2 hours",
+			DateSincePosted: "past hour",
 			Limit:           jc.config.App.MaxJobs,
 		}
 
@@ -362,6 +423,35 @@ func (jc *JobController) evaluateJobsWithRateLimit(jobs []*models.Job) ([]*model
 		return jobs, nil
 	}
 
+	// Use batch processing for initial evaluations (3 jobs at a time)
+	batchSize := 3
+	
+	// If we have a small number of jobs, fall back to individual processing
+	if len(jobs) <= 5 {
+		return jc.evaluateJobsIndividually(jobs)
+	}
+
+	jc.logger.Info("Using batch processing for %d jobs (batch size: %d)", len(jobs), batchSize)
+	evaluatedJobs, err := jc.evaluator.BatchEvaluateJobs(jobs, batchSize)
+	if err != nil {
+		jc.logger.Warning("Batch evaluation failed, falling back to individual evaluation: %v", err)
+		return jc.evaluateJobsIndividually(jobs)
+	}
+
+	// Count successful evaluations
+	successCount := 0
+	for _, job := range evaluatedJobs {
+		if job.Score != nil {
+			successCount++
+		}
+	}
+
+	jc.logger.Info("Batch evaluation completed: %d/%d jobs successfully evaluated", successCount, len(jobs))
+	return evaluatedJobs, nil
+}
+
+// evaluateJobsIndividually processes jobs one by one (fallback method)
+func (jc *JobController) evaluateJobsIndividually(jobs []*models.Job) ([]*models.Job, error) {
 	var evaluatedJobs []*models.Job
 	errorCount := 0
 

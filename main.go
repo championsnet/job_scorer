@@ -11,8 +11,6 @@ import (
 	"job-scorer/config"
 	"job-scorer/controller"
 	"job-scorer/utils"
-
-	"github.com/robfig/cron/v3"
 )
 
 // checkStartupFlag checks if the application has already run recently (within 30 minutes)
@@ -48,31 +46,45 @@ func main() {
 	
 	logger.Info("🚀 Starting Job Scorer application...")
 
+	// Get port from environment variable (Cloud Run requirement)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("Failed to load configuration: %v", err)
+		// Start a basic HTTP server even if config fails
+		startBasicServer(port, logger)
 		return
 	}
 
 	// Validate configuration
 	if err := validateConfig(cfg); err != nil {
 		logger.Error("Configuration validation failed: %v", err)
-		os.Exit(1)
+		// Start a basic HTTP server even if validation fails
+		startBasicServer(port, logger)
+		return
 	}
 
 	// Create job controller
-	controller, err := controller.NewJobController(cfg)
+	jobController, err := controller.NewJobController(cfg)
 	if err != nil {
 		logger.Error("Failed to create job controller: %v", err)
+		// Start a basic HTTP server even if controller creation fails
+		startBasicServer(port, logger)
 		return
 	}
 
 	// Print application status
-	printApplicationStatus(cfg, controller, logger)
+	printApplicationStatus(cfg, jobController, logger)
+
+	// Setup HTTP endpoints
+	setupHTTPHandlers(cfg, jobController, logger)
 
 	// Run jobs processing initially if RUN_ON_STARTUP is true
-	// But only if we haven't already run today (to avoid double execution with hot reload)
 	if cfg.App.RunOnStartup {
 		// Check if we're in development mode by looking for Air or development indicators
 		isDevMode := os.Getenv("AIR_MAIN_BINARY") != "" || os.Getenv("DEV_MODE") == "true"
@@ -86,62 +98,201 @@ func main() {
 			logger.Info("Skipping initial job processing (already ran within 30 minutes)")
 		} else {
 			logger.Info("Running initial job processing (RUN_ON_STARTUP=true)")
-			if err := controller.SearchAndFilterJobs(); err != nil {
-				logger.Error("Failed to process jobs: %v", err)
-			} else {
-				// Mark that we've run startup processing today
-				if err := createStartupFlag(cfg.App.DataDir); err != nil {
-					logger.Warning("Failed to create startup flag: %v", err)
+			go func() {
+				time.Sleep(5 * time.Second) // Give server time to start
+				if err := jobController.SearchAndFilterJobs(); err != nil {
+					logger.Error("Failed to process jobs: %v", err)
+				} else {
+					// Mark that we've run startup processing
+					if err := createStartupFlag(cfg.App.DataDir); err != nil {
+						logger.Warning("Failed to create startup flag: %v", err)
+					}
 				}
-			}
+			}()
 		}
 	} else {
 		logger.Info("Skipping initial job processing (RUN_ON_STARTUP=false)")
 	}
 
-	// Setup cron scheduler using configured schedule
-	c := cron.New()
-	_, err = c.AddFunc(cfg.App.CronSchedule, func() {
-		logger.Info("Running scheduled job processing (cron: %s)", cfg.App.CronSchedule)
-		if err := controller.SearchAndFilterJobs(); err != nil {
-			logger.Error("Scheduled job processing failed: %v", err)
-		}
-	})
-	if err != nil {
-		logger.Error("Failed to setup cron job with schedule '%s': %v", cfg.App.CronSchedule, err)
-		return
+	logger.Info("Starting HTTP server on port %s", port)
+	logger.Info("🔗 Health check: http://localhost:%s/health", port)
+	logger.Info("🔗 Manual run: http://localhost:%s/run", port)
+	logger.Info("🔗 Stats: http://localhost:%s/stats", port)
+	logger.Info("💡 For scheduled runs, use Google Cloud Scheduler to call the /run endpoint")
+	logger.Info("   Example cron expression: %s", cfg.App.CronSchedule)
+
+	// Start HTTP server (blocking)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		logger.Error("Failed to start HTTP server: %v", err)
+		os.Exit(1)
 	}
+}
 
-	// Start the cron scheduler
-	logger.Info("Starting cron scheduler with schedule: %s", cfg.App.CronSchedule)
-	c.Start()
-	defer c.Stop()
+func startBasicServer(port string, logger *utils.Logger) {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Job Scorer is running (configuration error - check logs)"))
+	})
 
-	// Setup HTTP server for health checks and manual triggers
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
-	
-	// Manual trigger endpoint for testing
-	http.HandleFunc("/trigger", func(w http.ResponseWriter, r *http.Request) {
-		logger.Info("Manual job processing triggered via HTTP")
-		if err := controller.SearchAndFilterJobs(); err != nil {
-			logger.Error("Manual job processing failed: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("Job processing failed"))
-		} else {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("Job processing completed"))
-		}
+
+	logger.Info("Starting basic HTTP server on port %s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		logger.Error("Failed to start HTTP server: %v", err)
+		os.Exit(1)
+	}
+}
+
+func setupHTTPHandlers(cfg *config.Config, jobController *controller.JobController, logger *utils.Logger) {
+	// Root endpoint
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		html := `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Job Scorer</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .endpoint { background: #f5f5f5; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .method { background: #007acc; color: white; padding: 2px 8px; border-radius: 3px; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <h1>🎯 Job Scorer API</h1>
+    <p>Job scoring and notification service is running!</p>
+    
+    <h2>📊 Available Endpoints:</h2>
+    <div class="endpoint">
+        <span class="method">GET</span> <strong>/health</strong> - Health check
+    </div>
+    <div class="endpoint">
+        <span class="method">POST</span> <strong>/run</strong> - Trigger job processing manually
+    </div>
+    <div class="endpoint">
+        <span class="method">GET</span> <strong>/stats</strong> - View application statistics
+    </div>
+    
+    <h2>⏰ Scheduled Execution:</h2>
+    <p>This service is designed to be triggered by Google Cloud Scheduler.</p>
+    <p>Configure your scheduler to call: <code>POST /run</code></p>
+    <p>Recommended schedule: <code>` + cfg.App.CronSchedule + `</code></p>
+    
+    <h2>🔧 Configuration:</h2>
+    <ul>
+        <li>Locations: ` + strings.Join(cfg.App.Locations, ", ") + `</li>
+        <li>Cron Schedule: ` + cfg.App.CronSchedule + `</li>
+        <li>Run on Startup: ` + fmt.Sprintf("%t", cfg.App.RunOnStartup) + `</li>
+    </ul>
+</body>
+</html>`
+		w.Write([]byte(html))
 	})
 
-	// Start HTTP server
-	port := ":8080"
-	logger.Info("Starting HTTP server on port %s", port)
-	if err := http.ListenAndServe(port, nil); err != nil {
-		logger.Error("HTTP server failed: %v", err)
-	}
+	// Health check endpoint
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok","service":"job-scorer"}`))
+	})
+
+	// Job processing endpoint (triggered by Cloud Scheduler)
+	http.HandleFunc("/run", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost && r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		logger.Info("🔄 Received request to run job processing (triggered via HTTP)")
+		
+		start := time.Now()
+		if err := jobController.SearchAndFilterJobs(); err != nil {
+			logger.Error("Failed to process jobs: %v", err)
+			http.Error(w, fmt.Sprintf("Failed to process jobs: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		duration := time.Since(start)
+		message := fmt.Sprintf("✅ Job processing completed successfully in %v", duration)
+		logger.Info(message)
+		
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(fmt.Sprintf(`{"status":"success","message":"%s","duration":"%v"}`, message, duration)))
+	})
+
+	// Statistics endpoint
+	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		stats := jobController.GetStats()
+		
+		w.Header().Set("Content-Type", "text/html")
+		html := `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Job Scorer Stats</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .stat-section { background: #f9f9f9; padding: 15px; margin: 10px 0; border-radius: 5px; }
+        .stat-item { margin: 5px 0; }
+        .badge { background: #28a745; color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+        .badge.false { background: #dc3545; }
+    </style>
+</head>
+<body>
+    <h1>📊 Job Scorer Statistics</h1>
+    <div class="stat-section">
+        <h3>🔧 Configuration</h3>`
+
+		if configStats, ok := stats["config"].(map[string]interface{}); ok {
+			html += fmt.Sprintf(`
+        <div class="stat-item">Locations: %v</div>
+        <div class="stat-item">Cron Schedule: %v</div>
+        <div class="stat-item">Groq API: <span class="badge %v">%v</span></div>
+        <div class="stat-item">SMTP: <span class="badge %v">%v</span></div>
+        <div class="stat-item">CV Loaded: <span class="badge %v">%v</span></div>`,
+				configStats["locations"],
+				configStats["cron_schedule"],
+				configStats["groq_configured"], configStats["groq_configured"],
+				configStats["smtp_configured"], configStats["smtp_configured"],
+				configStats["cv_loaded"], configStats["cv_loaded"])
+		}
+
+		html += `
+    </div>
+    <div class="stat-section">
+        <h3>🎯 Job Tracking</h3>`
+
+		if jobStats, ok := stats["job_tracker"].(map[string]interface{}); ok {
+			html += fmt.Sprintf(`
+        <div class="stat-item">Total Processed Jobs: %v</div>
+        <div class="stat-item">Recent Jobs (7 days): %v</div>`,
+				jobStats["total_processed_jobs"],
+				jobStats["recent_jobs_7_days"])
+		}
+
+		html += `
+    </div>
+    <div class="stat-section">
+        <h3>⚡ Rate Limiter</h3>`
+
+		if rateLimiterStats, ok := stats["rate_limiter"].(map[string]interface{}); ok {
+			html += fmt.Sprintf(`
+        <div class="stat-item">Active Requests: %v / %v</div>
+        <div class="stat-item">Tokens Used: %v / %v</div>`,
+				rateLimiterStats["active_requests"], rateLimiterStats["max_requests"],
+				rateLimiterStats["tokens_used"], rateLimiterStats["token_limit"])
+		}
+
+		html += `
+    </div>
+    <p><a href="/">← Back to Home</a></p>
+</body>
+</html>`
+		
+		w.Write([]byte(html))
+	})
 }
 
 func validateConfig(cfg *config.Config) error {
@@ -168,7 +319,7 @@ func validateConfig(cfg *config.Config) error {
 func printApplicationStatus(cfg *config.Config, jobController *controller.JobController, logger *utils.Logger) {
 	logger.Info("📋 Application Configuration:")
 	logger.Info("   📍 Job Locations: %v", cfg.App.Locations)
-	logger.Info("   ⏰ Cron Schedule: %s", cfg.App.CronSchedule)
+	logger.Info("   ⏰ Cron Schedule: %s (for Google Cloud Scheduler)", cfg.App.CronSchedule)
 	logger.Info("   🏃 Run on Startup: %t", cfg.App.RunOnStartup)
 	logger.Info("   📄 CV Path: %s", cfg.App.CVPath)
 	logger.Info("   💾 Output Directory: %s", cfg.App.OutputDir)

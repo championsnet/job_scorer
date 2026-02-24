@@ -1,0 +1,16 @@
+.git
+.gitignore
+README.md
+SETUP.md
+TESTING.md
+GCS_SETUP.md
+CLOUD_SCHEDULING.md
+deploy.sh
+dev.sh
+test.sh
+*.log
+coverage/
+data/logs/
+data/checkpoints/
+tmp/
+.env.example

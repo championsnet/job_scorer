@@ -90,18 +90,101 @@ func (f *Filter) isEnglishText(text string) bool {
 		return true // Too short to reliably detect
 	}
 
-	// Use confidence values instead of strict detection
-	confidenceValues := f.languageDetector.ComputeLanguageConfidenceValues(cleanedText)
+	// Multi-layer language detection
+	return f.enhancedLanguageDetection(cleanedText)
+}
+
+// Enhanced language detection with multiple validation layers
+func (f *Filter) enhancedLanguageDetection(text string) bool {
+	textLower := strings.ToLower(text)
 	
-	// Check if English confidence is above threshold (20%)
-	englishThreshold := 0.2 // 20%
-	for _, conf := range confidenceValues {
-		if conf.Language() == lingua.English && conf.Value() >= englishThreshold {
-			return true
+	// Layer 1: Check for obvious German requirements (immediate rejection)
+	germanRequirementKeywords := []string{
+		"deutsch erforderlich", "german required", "german fluency", "fluent german",
+		"muttersprache deutsch", "german native", "deutschkenntnisse", 
+		"fließend deutsch", "fluent in german", "german language skills",
+		"deutsch als muttersprache", "german c1", "german c2", "deutsch c1", "deutsch c2",
+		"deutsche sprachkenntnisse", "verhandlungssicher deutsch", "german proficiency",
+	}
+	
+	for _, keyword := range germanRequirementKeywords {
+		if strings.Contains(textLower, keyword) {
+			f.logger.Debug("Rejected due to German requirement keyword: %s", keyword)
+			return false
 		}
 	}
 	
-	return false
+	// Layer 2: Check for German job posting indicators
+	germanJobKeywords := []string{
+		"stellenausschreibung", "arbeitsplatz", "bewerbung", "lebenslauf",
+		"anstellung", "mitarbeiter", "unternehmen", "gesellschaft",
+		"verantwortung", "aufgaben", "anforderungen", "qualifikation",
+		"berufserfahrung", "abschluss", "studium", "ausbildung",
+	}
+	
+	germanKeywordCount := 0
+	for _, keyword := range germanJobKeywords {
+		if strings.Contains(textLower, keyword) {
+			germanKeywordCount++
+		}
+	}
+	
+	// If we find 2+ German job keywords, likely German posting
+	if germanKeywordCount >= 2 {
+		f.logger.Debug("Rejected due to %d German job keywords", germanKeywordCount)
+		return false
+	}
+	
+	// Layer 3: Language library confidence check (more lenient for edge cases)
+	confidenceValues := f.languageDetector.ComputeLanguageConfidenceValues(text)
+	
+	var englishConfidence, germanConfidence float64
+	for _, conf := range confidenceValues {
+		switch conf.Language() {
+		case lingua.English:
+			englishConfidence = conf.Value()
+		case lingua.German:
+			germanConfidence = conf.Value()
+		}
+	}
+	
+	// If German confidence is significantly higher than English, reject
+	if germanConfidence > 0.6 && germanConfidence > englishConfidence*1.5 {
+		f.logger.Debug("Rejected due to German confidence %.2f vs English %.2f", 
+			germanConfidence, englishConfidence)
+		return false
+	}
+	
+	// Layer 4: English indicators (positive signals)
+	englishIndicators := []string{
+		"english", "international", "multicultural", "global", "worldwide",
+		"european", "eu", "remote", "hybrid", "flexible", "agile",
+		"you will", "we are", "join our", "opportunity", "experience",
+		"skills", "requirements", "responsibilities", "benefits",
+	}
+	
+	englishIndicatorCount := 0
+	for _, indicator := range englishIndicators {
+		if strings.Contains(textLower, indicator) {
+			englishIndicatorCount++
+		}
+	}
+	
+	// If we have English indicators and reasonable confidence, accept
+	if englishIndicatorCount >= 2 && englishConfidence >= 0.15 {
+		f.logger.Debug("Accepted due to %d English indicators and %.2f confidence", 
+			englishIndicatorCount, englishConfidence)
+		return true
+	}
+	
+	// Default: accept if English confidence is reasonable
+	englishThreshold := 0.25 // Slightly higher than before for better accuracy
+	result := englishConfidence >= englishThreshold
+	
+	f.logger.Debug("Language detection result: %t (English: %.2f, German: %.2f)", 
+		result, englishConfidence, germanConfidence)
+	
+	return result
 }
 
 // Helper function to get minimum of two integers

@@ -236,8 +236,7 @@ func (c *CVReader) GetCV() (string, error) {
 func (c *CVReader) getFallbackCV() string {
 	return strings.TrimSpace(`
 Vasiliki Ploumistou
-Email: vas.ploumistou@gmail.com  | Phone: +41 77 210 03 06 | Location: Basel, Switzerland
-LinkedIn: linkedin.com/in/vasiliki-ploumistou
+Location: Basel, Switzerland
 
 ⸻
 
@@ -287,8 +286,11 @@ Elcune, Thessaloniki, Greece | Feb 2020 – Jun 2020
 ⸻
 
 EDUCATION:
+MSc Digital Transformation in Health
+Joint University Degreee | Sep 2025 – Present
+
 MSc Consultancy and Entrepreneurship
-Rotterdam University of Applied Sciences | Sep 2023 – Oct 2024 (Pre-Master Business Administration)
+Rotterdam University of Applied Sciences
 
 BSc Social and Religious Studies
 Aristotle University of Thessaloniki
