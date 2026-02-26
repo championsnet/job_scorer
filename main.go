@@ -262,6 +262,29 @@ func setupHTTPHandlers(cfg *config.Config, jobController *controller.JobControll
 		html += `
     </div>
     <div class="stat-section">
+        <h3>🧮 LLM Usage</h3>`
+
+		if llmUsage, ok := stats["llm_usage"].(map[string]interface{}); ok {
+			html += fmt.Sprintf(`
+        <div class="stat-item">Calls: %v</div>
+        <div class="stat-item">Input Tokens: %v</div>
+        <div class="stat-item">Non-cached Input Tokens: %v</div>
+        <div class="stat-item">Cached Input Tokens: %v</div>
+        <div class="stat-item">Billable Input Tokens: %v</div>
+        <div class="stat-item">Output Tokens: %v</div>
+        <div class="stat-item">Total Tokens: %v</div>`,
+				llmUsage["calls"],
+				llmUsage["input_tokens"],
+				llmUsage["non_cached_input_tokens"],
+				llmUsage["cached_input_tokens"],
+				llmUsage["billable_input_tokens"],
+				llmUsage["output_tokens"],
+				llmUsage["total_tokens"])
+		}
+
+		html += `
+    </div>
+    <div class="stat-section">
         <h3>🎯 Job Tracking</h3>`
 
 		if jobStats, ok := stats["job_tracker"].(map[string]interface{}); ok {

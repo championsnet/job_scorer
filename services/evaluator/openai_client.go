@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -22,6 +23,8 @@ type OpenAIClient struct {
 	client      *http.Client
 	logger      *utils.Logger
 	rateLimiter *utils.RateLimiter // Token-aware rate limiter
+	usageMutex  sync.Mutex
+	usageTotals TokenUsageTotals
 }
 
 type OpenAIRequest struct {
@@ -38,6 +41,7 @@ type Message struct {
 type OpenAIResponse struct {
 	Choices []Choice  `json:"choices"`
 	Error   *APIError `json:"error,omitempty"`
+	Usage   *Usage    `json:"usage,omitempty"`
 }
 
 type Choice struct {
@@ -48,6 +52,34 @@ type APIError struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
 	Code    string `json:"code"`
+}
+
+type Usage struct {
+	PromptTokens     int                 `json:"prompt_tokens,omitempty"`
+	CompletionTokens int                 `json:"completion_tokens,omitempty"`
+	TotalTokens      int                 `json:"total_tokens,omitempty"`
+	PromptDetails    *PromptTokenDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+type PromptTokenDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+type TokenUsageSnapshot struct {
+	InputTokens       int
+	CachedInputTokens int
+	OutputTokens      int
+	TotalTokens       int
+}
+
+type TokenUsageTotals struct {
+	Calls                 int
+	InputTokens           int
+	CachedInputTokens     int
+	NonCachedInputTokens  int
+	BillableInputTokens   int
+	OutputTokens          int
+	TotalTokens           int
 }
 
 func NewOpenAIClient(cfg *config.Config, rateLimiter *utils.RateLimiter) *OpenAIClient {
@@ -140,6 +172,9 @@ func (g *OpenAIClient) ChatCompletion(prompt string, maxTokens int) (string, err
 	if openAIResp.Error != nil {
 		return "", fmt.Errorf("API error: %s", openAIResp.Error.Message)
 	}
+
+	usage := g.extractUsage(resp.Header, openAIResp.Usage)
+	g.recordUsage(usage)
 
 	if len(openAIResp.Choices) == 0 {
 		return "", fmt.Errorf("no choices in response")
@@ -235,6 +270,12 @@ func (g *OpenAIClient) IsConfigured() bool {
 	return g.apiKey != ""
 }
 
+func (g *OpenAIClient) GetUsageTotals() TokenUsageTotals {
+	g.usageMutex.Lock()
+	defer g.usageMutex.Unlock()
+	return g.usageTotals
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -249,4 +290,96 @@ func firstHeaderValue(headers http.Header, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func parseHeaderInt(headers http.Header, keys ...string) int {
+	value := firstHeaderValue(headers, keys...)
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func (g *OpenAIClient) extractUsage(headers http.Header, bodyUsage *Usage) TokenUsageSnapshot {
+	usage := TokenUsageSnapshot{
+		InputTokens: parseHeaderInt(headers,
+			"x-usage-input-tokens",
+			"openai-usage-input-tokens",
+			"x-openai-usage-input-tokens",
+		),
+		CachedInputTokens: parseHeaderInt(headers,
+			"x-usage-cached-input-tokens",
+			"openai-usage-cached-input-tokens",
+			"x-openai-usage-cached-input-tokens",
+		),
+		OutputTokens: parseHeaderInt(headers,
+			"x-usage-output-tokens",
+			"openai-usage-output-tokens",
+			"x-openai-usage-output-tokens",
+		),
+		TotalTokens: parseHeaderInt(headers,
+			"x-usage-total-tokens",
+			"openai-usage-total-tokens",
+			"x-openai-usage-total-tokens",
+		),
+	}
+
+	// Fallback to body usage when provider does not expose usage headers.
+	if bodyUsage != nil {
+		if usage.InputTokens == 0 {
+			usage.InputTokens = bodyUsage.PromptTokens
+		}
+		if usage.OutputTokens == 0 {
+			usage.OutputTokens = bodyUsage.CompletionTokens
+		}
+		if usage.TotalTokens == 0 {
+			usage.TotalTokens = bodyUsage.TotalTokens
+		}
+		if usage.CachedInputTokens == 0 && bodyUsage.PromptDetails != nil {
+			usage.CachedInputTokens = bodyUsage.PromptDetails.CachedTokens
+		}
+	}
+
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+	}
+	return usage
+}
+
+func (g *OpenAIClient) recordUsage(usage TokenUsageSnapshot) {
+	g.usageMutex.Lock()
+	defer g.usageMutex.Unlock()
+
+	g.usageTotals.Calls++
+	g.usageTotals.InputTokens += usage.InputTokens
+	g.usageTotals.CachedInputTokens += usage.CachedInputTokens
+	nonCachedInput := usage.InputTokens - usage.CachedInputTokens
+	if nonCachedInput < 0 {
+		nonCachedInput = 0
+	}
+	g.usageTotals.NonCachedInputTokens += nonCachedInput
+	// Cached tokens are still billable (often at a different rate), so billable input includes all input.
+	g.usageTotals.BillableInputTokens += usage.InputTokens
+	g.usageTotals.OutputTokens += usage.OutputTokens
+	g.usageTotals.TotalTokens += usage.TotalTokens
+
+	g.logger.Info(
+		"🧮 LLM usage this call: input=%d (non_cached=%d cached=%d) output=%d total=%d | cumulative: calls=%d input=%d (non_cached=%d cached=%d billable=%d) output=%d total=%d",
+		usage.InputTokens,
+		nonCachedInput,
+		usage.CachedInputTokens,
+		usage.OutputTokens,
+		usage.TotalTokens,
+		g.usageTotals.Calls,
+		g.usageTotals.InputTokens,
+		g.usageTotals.NonCachedInputTokens,
+		g.usageTotals.CachedInputTokens,
+		g.usageTotals.BillableInputTokens,
+		g.usageTotals.OutputTokens,
+		g.usageTotals.TotalTokens,
+	)
 }

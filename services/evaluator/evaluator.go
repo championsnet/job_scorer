@@ -831,3 +831,7 @@ func renderTemplate(template string, values map[string]string) string {
 	}
 	return rendered
 }
+
+func (e *Evaluator) GetLLMUsageTotals() TokenUsageTotals {
+	return e.openAIClient.GetUsageTotals()
+}

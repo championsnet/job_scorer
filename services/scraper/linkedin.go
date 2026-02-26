@@ -661,6 +661,7 @@ func (s *LinkedInScraper) getDateSincePosted(dateSince string) string {
 	dateRange := map[string]string{
 		"past hour":     "r4000",
 		"past 2 hours":  "r7600",
+		"past day":      "r86400",
 		"past month":    "r2592000",
 		"past week":     "r604800",
 		"past 24 hours": "r86400",

@@ -361,6 +361,10 @@ func (jc *JobController) SearchAndFilterJobs() error {
 	jc.logger.Info("   • Promising Jobs: %d jobs", len(promisingJobs))
 	jc.logger.Info("   • Final Recommendations: %d jobs", finalSuccessCount)
 	jc.logger.Info("   • Email Notifications: %d jobs", len(validatedNotificationJobs))
+	llmUsage := jc.evaluator.GetLLMUsageTotals()
+	jc.logger.Info("   • LLM Token Usage: input=%d (non_cached=%d, cached=%d, billable=%d), output=%d, total=%d, calls=%d",
+		llmUsage.InputTokens, llmUsage.NonCachedInputTokens, llmUsage.CachedInputTokens, llmUsage.BillableInputTokens,
+		llmUsage.OutputTokens, llmUsage.TotalTokens, llmUsage.Calls)
 	jc.logger.Info("")
 
 	return nil
@@ -553,6 +557,17 @@ func (jc *JobController) GetStats() map[string]interface{} {
 		"llm_configured":  jc.config.OpenAI.APIKey != "",
 		"smtp_configured": jc.notifier.IsConfigured(),
 		"cv_loaded":       jc.cvReader.IsLoaded(),
+	}
+
+	usage := jc.evaluator.GetLLMUsageTotals()
+	stats["llm_usage"] = map[string]interface{}{
+		"calls":                   usage.Calls,
+		"input_tokens":            usage.InputTokens,
+		"non_cached_input_tokens": usage.NonCachedInputTokens,
+		"cached_input_tokens":     usage.CachedInputTokens,
+		"billable_input_tokens":   usage.BillableInputTokens,
+		"output_tokens":           usage.OutputTokens,
+		"total_tokens":            usage.TotalTokens,
 	}
 
 	// Job tracking stats
