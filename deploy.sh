@@ -95,8 +95,6 @@ cleanup_build_artifacts() {
 .git
 .gitignore
 README.md
-SETUP.md
-TESTING.md
 GCS_SETUP.md
 CLOUD_SCHEDULING.md
 deploy.sh
@@ -107,7 +105,9 @@ coverage/
 data/logs/
 data/checkpoints/
 tmp/
-.env.example
+.env
+env.example
+*.pdf
 EOF
     
     print_success "Build artifacts cleaned"
@@ -148,10 +148,10 @@ build_and_deploy() {
     else
         print_warning ".env file not found. Using default environment variables only."
         print_warning "Make sure to set required variables manually in Cloud Run console:"
-        print_warning "  • GROQ_API_KEY"
+        print_warning "  • OPENAI_API_KEY (or GROQ_API_KEY for backward compatibility)"
         print_warning "  • SMTP_* variables for email notifications"
         print_warning "  • CV_PATH for your CV file"
-        print_warning "  • JOB_LOCATIONS for target job locations"
+        print_warning "  • Configure app.jobLocations in config/config.json"
     fi
     
     # Handle force clean deployment
@@ -295,10 +295,10 @@ show_summary() {
         echo "  ✅ Loaded from .env file automatically"
     else
         echo "  ⚠️  No .env file found - set these manually in Cloud Run console:"
-        echo "     • GROQ_API_KEY (required)"
+        echo "     • OPENAI_API_KEY (or GROQ_API_KEY for backward compatibility)"
         echo "     • SMTP_* variables for email notifications"
         echo "     • CV_PATH for your CV file"
-        echo "     • JOB_LOCATIONS for target job locations"
+        echo "     • Configure app.jobLocations in config/config.json"
     fi
     echo
     echo "💡 Pro Tips:"

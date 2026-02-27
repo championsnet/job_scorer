@@ -156,6 +156,37 @@ Estimated monthly costs for typical usage:
 - Operations: ~1,000/month → **$0.005/month**
 - **Total: ~$0.01/month** (practically free)
 
+## Hourly runs: total cost (LLM + Cloud + GCS)
+
+For hourly execution you typically pay for:
+- **LLM tokens** (usually the largest component)
+- **Cloud Run + Cloud Scheduler**
+- **GCS storage + operations** (usually negligible at this scale)
+
+### Example LLM cost (gpt-4o-mini)
+
+From a real run log (`JobScorer_2026-02-26_16-46-25.log`):
+- input tokens: **15,641**
+- output tokens: **3,277**
+
+Using gpt-4o-mini pricing (input **$0.15 / 1M**, cached input **$0.075 / 1M**, output **$0.60 / 1M**):
+- per-run LLM cost ≈ **$0.0043**
+- hourly (≈720 runs/month) LLM cost ≈ **$3.11/month**
+
+Token usage varies by batch size, CV length, job description size, and how many jobs reach the evaluation stages, so treat this as a baseline.
+
+### Example GCS cost (hourly)
+
+At a minimum, each run tends to write a handful of objects (job data files, checkpoints, logs).
+Even assuming **10–25 object writes per run**, hourly runs are:
+- **~7,200–18,000 writes/month**
+
+For most buckets/regions, that’s typically **well under $0.10/month** in operations, and storage remains tiny (usually **tens of MB/month** unless you keep long log history).
+
+### Bottom line
+
+For hourly runs, you should expect the **LLM cost to dominate**, with **GCS adding only cents** (and Cloud Run/Scheduler typically under ~$1/month depending on free tiers and runtime duration).
+
 ## Deployment on Google Cloud Run
 
 When deploying to Cloud Run, GCS integration is highly recommended:
@@ -168,7 +199,9 @@ gcloud run deploy job-scorer \
   --region=us-central1
 ```
 
-The Cloud Run service will automatically have permissions to access GCS in the same project.
+Cloud Run does **not** automatically have permission to read/write your bucket. You must grant the Cloud Run runtime service account access (for example `roles/storage.objectAdmin` on the bucket) or use a dedicated service account.
+
+Tip: for production, prefer a dedicated runtime service account + least-privilege bucket IAM.
 
 ## Troubleshooting
 

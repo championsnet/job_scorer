@@ -65,10 +65,10 @@ func TestLoad(t *testing.T) {
 					ToRecipients: []string{},
 				},
 				App: AppConfig{
-					Locations:    []string{"90009885", "90009888"},
+					Locations:    []string{},
 					CronSchedule: "0 */1 * * *",
 					RunOnStartup: true,
-					CVPath:       "CV_Vasiliki Ploumistou_22_05.pdf",
+					CVPath:       "your_cv.pdf",
 					DataDir:      "data",
 					OutputDir:    ".",
 				},

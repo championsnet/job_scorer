@@ -41,6 +41,7 @@ Thumbs.db
 data/
 *.csv
 *.json
+CV*.pdf
 
 # Output files
 output/
@@ -56,3 +57,5 @@ temp/
 .env.*.local
 
 job-scorer
+
+!config/config.example.json

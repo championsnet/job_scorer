@@ -82,7 +82,12 @@ func Load() (*Config, error) {
 		cvPath = envCVPath
 	}
 	if cvPath == "" {
-		cvPath = "CV_Vasiliki Ploumistou_22_05.pdf"
+		cvPath = "your_cv.pdf"
+	}
+	locations := append([]string{}, policy.App.JobLocations...)
+	// Backward compatibility: allow .env fallback when policy locations are not set.
+	if len(locations) == 0 {
+		locations = parseCSV(getEnv("JOB_LOCATIONS", ""))
 	}
 
 	config := &Config{
@@ -98,10 +103,10 @@ func Load() (*Config, error) {
 			User:         getEnv("SMTP_USER", ""),
 			Pass:         getEnv("SMTP_PASS", ""),
 			From:         getEnv("SMTP_FROM", ""),
-			ToRecipients: strings.Split(getEnv("SMTP_TO", ""), ","),
+			ToRecipients: parseCSV(getEnv("SMTP_TO", "")),
 		},
 		App: AppConfig{
-			Locations:             strings.Split(getEnv("JOB_LOCATIONS", "90009885,90009888"), ","),
+			Locations:             locations,
 			CronSchedule:          cronSchedule,
 			RunOnStartup:          getEnvBool("RUN_ON_STARTUP", true),
 			CVPath:                cvPath,
@@ -151,4 +156,16 @@ func getEnvBool(key string, defaultValue bool) bool {
 		}
 	}
 	return defaultValue
+}
+
+func parseCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }

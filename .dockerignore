@@ -1,8 +1,6 @@
 .git
 .gitignore
 README.md
-SETUP.md
-TESTING.md
 GCS_SETUP.md
 CLOUD_SCHEDULING.md
 deploy.sh
@@ -13,4 +11,6 @@ coverage/
 data/logs/
 data/checkpoints/
 tmp/
-.env.example
+.env
+env.example
+*.pdf

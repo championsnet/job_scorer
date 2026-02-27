@@ -94,11 +94,13 @@ Set these in Cloud Run:
 
 ```bash
 # Required
-GROQ_API_KEY=your_groq_api_key
+OPENAI_API_KEY=your_openai_api_key
+# Optional legacy fallback:
+# GROQ_API_KEY=your_groq_api_key
 
-# Job search
-JOB_LOCATIONS=90009885,90009888
-CV_PATH=CV_Vasiliki Ploumistou_22_05.pdf
+# Optional overrides (not required if you bake config into the deploy)
+# Deprecated fallback override. Prefer setting `cv.path` in config/config.json.
+# CV_PATH=your_cv.pdf
 
 # Email notifications
 SMTP_HOST=smtp.gmail.com
@@ -116,6 +118,24 @@ GCS_PROJECT_ID=your-project-id
 # Scheduling behavior
 RUN_ON_STARTUP=true
 CRON_SCHEDULE=0 */1 * * *
+```
+
+Set locations and other policy values in `config/config.json` (redeploy after changes):
+
+```json
+{
+  "app": {
+    "jobLocations": ["10000000", "20000000"]
+  }
+}
+```
+
+Set CV path in `config/config.json`:
+
+```json
+{
+  "cv": { "path": "your_cv.pdf" }
+}
 ```
 
 ### Schedule Examples
@@ -284,7 +304,14 @@ gcloud scheduler jobs update http job-scorer-scheduler \
 - 1 job, hourly execution
 - ~$0.10/month
 
-**Total: ~$0.60/month** for hourly job processing
+**GCS (optional):**
+- Typically pennies/month at this scale (see `GCS_SETUP.md` for assumptions)
+
+**LLM usage:**
+- Depends on how many jobs reach evaluation and your prompt sizes.
+- For an example using real token totals + gpt-4o-mini pricing, see `README.md` and `GCS_SETUP.md`.
+
+**Total (excluding LLM): ~$0.60/month** for hourly job processing
 
 ## 🔒 Security
 

@@ -1,70 +1,34 @@
-# Job Scorer - Go Edition
+# Job Scorer (Go)
 
-An intelligent job search and evaluation system written in Go that finds promising jobs, evaluates them against your CV using AI, and sends email notifications for the best matches.
+Job Scorer finds jobs from LinkedIn public listings, scores them with an LLM, matches them against your CV, and optionally emails you only the best matches.
 
-## 🚀 Features
+## 🚀 What it does
 
-- 🔍 **Automated Job Search**: Searches LinkedIn for jobs in Basel and Zurich every hour
-- 🤖 **AI-Powered Initial Screening**: Uses GPT models to evaluate job titles and basic criteria
-- 📄 **CV Matching**: Fetches full job descriptions and compares them against your CV
-- 📧 **Smart Email Notifications**: Only sends emails for jobs that pass both screenings
-- ⚡ **Concurrent Processing**: Efficient Go-based concurrent evaluation of multiple jobs
-- 🎯 **Policy Driven**: Prompts, thresholds, filters, language rules, and email text are configurable in JSON
-- 🚦 **Rate Limiting**: Intelligent rate limiting to respect API limits
-- 📊 **Structured Logging**: Comprehensive logging with different log levels
-- 🗂️ **Clean Architecture**: Well-organized codebase with clear separation of concerns
+- **Scrape**: query LinkedIn Jobs (public guest endpoints)
+- **Prefilter**: policy-based keyword/language/seniority rules
+- **Score**: LLM initial screen + CV-based match
+- **Notify**: optional HTML email when jobs pass your thresholds
+- **Run anywhere**: local binary or Cloud Run + Cloud Scheduler
 
-## 🏗️ Architecture
+## ✅ Quick start (local)
 
-The application is built with a clean, modular architecture:
+1. Install Go \(1.21+\).
 
-```
-job-scorer/
-├── main.go                          # Application entry point
-├── config/                          # Configuration management
-├── models/                          # Data models
-├── services/                        # Business logic services
-│   ├── scraper/                    # LinkedIn job scraping
-│   ├── evaluator/                  # AI-powered job evaluation
-│   ├── cv/                         # CV reading and processing
-│   ├── filter/                     # Job filtering logic
-│   ├── notification/               # Email notifications
-│   └── storage/                    # File storage operations
-├── controller/                      # Application orchestration
-└── utils/                          # Shared utilities
-```
+2. Create config files:
 
-## 📋 Prerequisites
-
-- Go 1.21 or higher
-- OpenAI API key for LLM access
-- SMTP credentials for email notifications
-- Your CV in PDF format
-
-## 🛠️ Installation
-
-1. **Clone and build:**
-```bash
-git clone <repository-url>
-cd job-scorer
-go mod download
-go build -o job-scorer
-```
-
-2. **Create configuration files:**
 ```bash
 cp env.example .env
 cp config/config.example.json config/config.json
 ```
 
-3. **Configure your environment variables in `.env`:**
+3. Edit `.env` \(secrets + runtime toggles\):
+
 ```env
-# OpenAI API Configuration
 OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL=gpt-5.2
+OPENAI_MODEL=gpt-4o-mini
 POLICY_CONFIG_PATH=config/config.json
 
-# SMTP Configuration
+# Optional email
 SMTP_HOST=smtp.your-provider.com
 SMTP_PORT=587
 SMTP_SECURE=false
@@ -73,189 +37,122 @@ SMTP_PASS=your_app_password
 SMTP_FROM=your_email@domain.com
 SMTP_TO=recipient@domain.com
 
-# Application Configuration
-JOB_LOCATIONS=90009885,90009888
 RUN_ON_STARTUP=true
-
-# Rate Limiting
-MAX_REQUESTS_PER_MINUTE=30
 ```
 
-4. **Configure CV path in `config/config.json`**
-```json
-{
-  "cv": {
-    "path": "your_cv.pdf"
-  }
-}
-```
+4. Edit `config/config.json` \(your actual policy\):
 
-5. **Place your CV file in the referenced location**
-
-## 🏃‍♂️ Usage
-
-**Run the application:**
-```bash
-./job-scorer
-```
-
-The system will:
-- Run immediately on startup (if `RUN_ON_STARTUP=true`)
-- Schedule automatic runs based on `CRON_SCHEDULE`
-- Save results to JSON files
-- Send email notifications for recommended jobs
-
-**Build for different platforms:**
-```bash
-# For Linux
-GOOS=linux GOARCH=amd64 go build -o job-scorer-linux
-
-# For Windows
-GOOS=windows GOARCH=amd64 go build -o job-scorer.exe
-
-# For macOS
-GOOS=darwin GOARCH=amd64 go build -o job-scorer-mac
-```
-
-## ⚙️ Configuration
-
-### Job Search Locations
-
-Edit the `JOB_LOCATIONS` environment variable:
-```env
-JOB_LOCATIONS=90009885,90009888  # Basel, Zurich location IDs
-```
-
-### Policy Configuration
-
-All business-policy behavior is now in `config/config.json`, including:
-- title/location/language filters and keyword lists
-- LLM prompts and per-stage token budgets
-- pipeline thresholds, batch sizes, and final validation rules
-- CV parser order and fallback profile text
-- email subject/body strings and notification gate rules
-- scraper retries/backoff/pagination/delay constants
-
-### Scheduling
-
-Modify the schedule in `config/config.json`:
 ```json
 {
   "app": {
-    "cronSchedule": "0 */1 * * *"
-  }
+    "cronSchedule": "0 */1 * * *",
+    "jobLocations": ["10000000", "20000000"]
+  },
+  "cv": { "path": "your_cv.pdf" }
 }
 ```
 
-Set the scraping window in `config/config.json`:
+5. Put your CV PDF at the configured path, then run:
+
+```bash
+go build -o job-scorer .
+./job-scorer
+```
+
+## ⚙️ Configuration (the important bits)
+
+### Job locations (LinkedIn geo IDs)
+
+Locations live in `config/config.json` as `app.jobLocations`:
+
 ```json
-{
-  "scraper": {
-    "dateSincePosted": "past hour"
-  }
-}
+{ "app": { "jobLocations": ["10000000", "20000000"] } }
 ```
 
-## 📁 Output Files
+#### How to get a LinkedIn `geoId`
 
-- `allJobs.json`: All scraped jobs
-- `promisingJobs.json`: Jobs that passed initial screening (score ≥ 7)
-- `finalEvaluatedJobs.json`: Jobs that passed CV evaluation
+- **Method A (fastest): from the URL**
+  - Open LinkedIn → **Jobs**
+  - Set a **Location** filter (city/region)
+  - Copy the browser URL and look for `geoId=...`
+  - Example: if the URL contains `geoId=102890719`, then your geo ID is `102890719`
 
-## 📧 Email Format
+- **Method B: from network requests (more reliable if URL changes)**
+  - Open DevTools → Network tab
+  - Load/scroll a LinkedIn Jobs search results page
+  - Filter for a request containing `seeMoreJobPostings` (LinkedIn jobs-guest API)
+  - Open the request URL and copy the `geoId` query parameter
 
-Emails include:
-- Modern HTML design with job cards
-- Initial and final evaluation scores
-- CV-based evaluation reasoning
-- Direct application links
-- JSON attachment with full data
+Notes:
+- `jobLocations` is an array so you can target multiple regions.
+- `JOB_LOCATIONS` env var still exists as a **deprecated fallback** for backwards compatibility, but config JSON is the intended source of truth.
+
+### CV path
+
+Set in `config/config.json`:
+
+```json
+{ "cv": { "path": "your_cv.pdf" } }
+```
+
+### Scheduling
+
+- **Local**: the app starts an HTTP server and can run on startup.
+- **Cloud Run**: use **Cloud Scheduler** to call `POST /run` (see `CLOUD_SCHEDULING.md`).
+
+### Provider / API
+
+- Uses `OPENAI_API_KEY` and an OpenAI-compatible endpoint (`OPENAI_BASE_URL`).
+- `GROQ_API_KEY` is supported as a legacy fallback.
 
 ## 🔧 Development
 
-**Run in development mode:**
+Hot reload + helpers:
+
 ```bash
-go run main.go
+./dev.sh setup
+./dev.sh run
 ```
 
-**Run tests:**
+Tests:
+
 ```bash
 go test ./...
 ```
 
-**Format code:**
-```bash
-go fmt ./...
-```
+## 📁 Outputs
 
-**Lint code:**
-```bash
-golangci-lint run
-```
+By default it writes JSON artifacts like:
+- `allJobs.json`
+- `promisingJobs.json`
+- `finalEvaluatedJobs.json`
 
-## 🚨 Troubleshooting
+## 💰 Cost estimate (gpt-4o-mini)
 
-### Common Issues
+Using gpt-4o-mini pricing (input **$0.15 / 1M**, cached input **$0.075 / 1M**, output **$0.60 / 1M**; see OpenAI’s [GPT-4o mini pricing note](https://developers.openai.com/api/docs/pricing)):
 
-1. **CV Loading Errors**: Ensure PDF file exists and is readable
-2. **LinkedIn Blocking**: Randomized headers and delays prevent rate limiting
-3. **Email Failures**: Verify SMTP credentials and connection
-4. **API Errors**: Check OpenAI API key and rate limits
+- **Average LLM cost per 100 jobs searched**: **~$0.0023**
+- **Estimated LLM cost if run hourly for one month** (≈720 runs): **~$3.11/month**
 
-### Debug Logging
+These are ballpark estimates; actual cost varies with CV length, job description length, and how many jobs reach the LLM evaluation stages.
 
-The application provides comprehensive logging. Check the console output for:
-- Job fetching progress
-- Evaluation scores and reasons
-- Email sending status
-- Error messages with context
+## 🚨 Troubleshooting (common)
 
-### Rate Limiting
+- **No jobs**: confirm your `app.jobLocations` geo IDs are valid; start with a single geo ID and a small `MAX_JOBS_PER_LOCATION`.
+- **LinkedIn throttling**: reduce `MAX_JOBS_PER_LOCATION`, increase delays in policy scraper settings, and run less frequently.
+- **CV parse fails**: verify the PDF path; try simpler PDFs; check logs for which parser was used.
+- **No emails**: SMTP is optional; leave SMTP vars empty to disable notifications.
 
-The application includes intelligent rate limiting:
-- Default: 30 requests per minute
-- Automatic backoff when limits are reached
-- Configurable via `MAX_REQUESTS_PER_MINUTE`
+## 🔒 Security & legal
 
-## 🎨 Customization
-
-### Adding New Job Sources
-
-Implement the scraper interface in `services/scraper/` to add new job sources.
-
-### Changing Email Templates
-
-Edit the `notification` block in `config/config.json`.
-
-## 🔒 Security & Legal
-
-- Uses public LinkedIn job listings
-- Respects rate limits and robots.txt
-- No authentication bypass or scraping of private data
-- Ensure compliance with LinkedIn's terms of service
-- Follow your local regulations regarding automated data collection
-
-## 📊 Performance
-
-**Go vs Node.js Benefits:**
-- **Memory Usage**: ~50-70% lower memory consumption
-- **Startup Time**: ~3x faster startup
-- **Concurrent Processing**: Better handling of multiple jobs
-- **Binary Distribution**: Single executable, no dependencies
-- **Rate Limiting**: More efficient implementation with Go channels
+- Keep secrets in `.env` or your cloud secret manager; never commit real keys.
+- Don’t commit your CV PDF or generated outputs.
+- Ensure your usage complies with LinkedIn’s terms and local regulations.
 
 ## 🤝 Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+PRs welcome. Please add/adjust tests for meaningful changes.
 
 ## 📄 License
 
-MIT License - See LICENSE file for details.
-
----
-
-**Built with ❤️ in Go for efficient job searching and career growth!** 
+MIT (see `LICENSE`).

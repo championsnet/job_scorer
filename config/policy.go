@@ -27,7 +27,8 @@ type CandidateProfilePolicy struct {
 }
 
 type AppPolicy struct {
-	CronSchedule string `json:"cronSchedule"`
+	CronSchedule string   `json:"cronSchedule"`
+	JobLocations []string `json:"jobLocations"`
 }
 
 type FilterPolicy struct {
@@ -166,14 +167,15 @@ func loadPolicy(path string) (Policy, error) {
 func defaultPolicy() Policy {
 	return Policy{
 		CandidateProfile: CandidateProfilePolicy{
-			TargetLocations:  []string{"Basel", "Zurich"},
-			CommuteLocations: []string{"Basel", "Zurich"},
+			TargetLocations:  []string{"Your target city"},
+			CommuteLocations: []string{"Your commute area"},
 			Languages:        []string{"English"},
 			DesiredFields:    []string{"Marketing", "Business Development", "Operations", "Administration", "Strategy", "HR"},
 			Seniority:        []string{"Entry", "Junior", "Intern", "Graduate", "Trainee", "Assistant"},
 		},
 		App: AppPolicy{
 			CronSchedule: "0 */1 * * *",
+			JobLocations: []string{},
 		},
 		Filters: FilterPolicy{
 			UnwantedLocations: []string{
@@ -213,7 +215,7 @@ func defaultPolicy() Policy {
 			MinTextLengthForLanguageDetect: 8,
 		},
 		Evaluation: EvaluationPolicy{
-			InitialPromptTemplate: `Rate job 0-10 for EU candidate (Basel/Zurich, entry-level).
+			InitialPromptTemplate: `Rate job 0-10 for candidate targeting entry-level roles in configured locations.
 
 GOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR
 BAD FIELDS: Engineering, Data Science, Finance, Legal, Medical
@@ -226,8 +228,8 @@ Respond JSON only:
 {"score": X, "recommend": true/false, "reasons": ["brief reason"]}`,
 			FinalPromptTemplate: `CV vs Job match analysis (0-10).
 
-RED FLAGS (score=0): German required, Deutsch erforderlich, non-English fluency
-MATCH: Skills, experience level (0-2yrs), Basel/Zurich location
+RED FLAGS (score=0): Required language that does not match candidate profile
+MATCH: Skills, experience level (0-2yrs), configured target locations
 SKILLS: Marketing, Business Dev, Operations, Admin, Strategy, HR
 
 CV:
@@ -238,7 +240,7 @@ Description: {{JOB_DESCRIPTION}}
 
 JSON only:
 {"finalScore": X, "shouldApply": true/false, "reasons": ["key reason"]}`,
-			BatchPromptTemplate: `Rate jobs 0-10 for EU candidate (Basel/Zurich, entry-level).
+			BatchPromptTemplate: `Rate jobs 0-10 for candidate targeting entry-level roles in configured locations.
 
 GOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR
 BAD FIELDS: Engineering, Data Science, Finance, Legal, Medical
@@ -301,7 +303,7 @@ JSON only: {"valid": true/false, "reason": "brief"}`,
 			JobDescriptionPreviewLimit: 300,
 		},
 		CV: CVPolicy{
-			Path:                       "CV_Vasiliki Ploumistou_22_05.pdf",
+			Path:                       "your_cv.pdf",
 			ParserOrder:                 []string{"unipdf", "fitz", "ledongthuc"},
 			EnableUniPDF:                false,
 			FallbackText:                "CV not available. Candidate background unavailable.",
@@ -346,6 +348,9 @@ func applyPolicyDefaults(p *Policy) {
 	}
 	if strings.TrimSpace(p.App.CronSchedule) == "" {
 		p.App.CronSchedule = defaults.App.CronSchedule
+	}
+	if len(p.App.JobLocations) == 0 {
+		p.App.JobLocations = defaults.App.JobLocations
 	}
 	if len(p.Filters.UnwantedWordsInTitle) == 0 {
 		p.Filters.UnwantedWordsInTitle = defaults.Filters.UnwantedWordsInTitle
