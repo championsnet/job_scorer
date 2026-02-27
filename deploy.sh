@@ -97,6 +97,7 @@ cleanup_build_artifacts() {
 README.md
 GCS_SETUP.md
 CLOUD_SCHEDULING.md
+TESTING.md
 deploy.sh
 dev.sh
 test.sh
