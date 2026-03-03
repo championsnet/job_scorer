@@ -42,6 +42,7 @@ data/
 *.csv
 *.json
 CV*.pdf
+CV*.md
 
 # Output files
 output/

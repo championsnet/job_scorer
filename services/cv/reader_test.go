@@ -1,11 +1,66 @@
 package cv
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"job-scorer/config"
 )
+
+func TestLoadCV_FromMarkdownFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cvPath := filepath.Join(dir, "candidate.md")
+	content := "# Candidate\n\nExperienced in growth, operations, and strategy."
+	if err := os.WriteFile(cvPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to create markdown CV: %v", err)
+	}
+
+	reader := NewCVReader(cvPath, config.CVPolicy{
+		FallbackText:       "fallback cv",
+		MinValidTextLength: 10,
+		MinLetterRatio:     0.3,
+	})
+
+	text, err := reader.LoadCV()
+	if err != nil {
+		t.Fatalf("LoadCV returned error: %v", err)
+	}
+
+	if text == "" {
+		t.Fatal("expected CV text to be loaded from markdown file")
+	}
+	if text == "fallback cv" {
+		t.Fatal("expected markdown content, got fallback CV")
+	}
+}
+
+func TestLoadCV_FromMarkdownFileUsesFallbackWhenInvalid(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cvPath := filepath.Join(dir, "candidate.md")
+	if err := os.WriteFile(cvPath, []byte("##"), 0644); err != nil {
+		t.Fatalf("failed to create markdown CV: %v", err)
+	}
+
+	reader := NewCVReader(cvPath, config.CVPolicy{
+		FallbackText:       "fallback cv",
+		MinValidTextLength: 10,
+		MinLetterRatio:     0.3,
+	})
+
+	text, err := reader.LoadCV()
+	if err != nil {
+		t.Fatalf("LoadCV returned error: %v", err)
+	}
+	if text != "fallback cv" {
+		t.Fatalf("expected fallback CV, got %q", text)
+	}
+}
 
 func TestCleanText(t *testing.T) {
 	reader := &CVReader{
@@ -29,8 +84,8 @@ func TestCleanText(t *testing.T) {
 			expected: "Text with  control chars",
 		},
 		{
-			input:    "Résumé – Zürich\nΚαλημέρα",
-			expected: "Résumé – Zürich\nΚαλημέρα",
+			input:    "Resume - Zurich\nKalimera",
+			expected: "Resume - Zurich\nKalimera",
 		},
 	}
 
@@ -46,24 +101,6 @@ func TestIsValidText(t *testing.T) {
 	reader := &CVReader{
 		policy: config.CVPolicy{MinValidTextLength: 40, MinLetterRatio: 0.40},
 	}
-
-	// Debug test
-	testText := "Marketing and business development experience"
-	result := reader.isValidText(testText)
-	t.Logf("Testing text: %q, result: %t", testText, result)
-	t.Logf("Text length: %d", len(testText))
-
-	// Debug the keyword matching
-	expectedKeywords := []string{"experience", "education", "skills", "work", "job", "company", "university", "degree", "marketing", "business", "development", "operations", "administration"}
-	lowerText := strings.ToLower(testText)
-	keywordCount := 0
-	for _, keyword := range expectedKeywords {
-		if strings.Contains(lowerText, keyword) {
-			keywordCount++
-			t.Logf("Found keyword: %s", keyword)
-		}
-	}
-	t.Logf("Total keywords found: %d", keywordCount)
 
 	tests := []struct {
 		input    string

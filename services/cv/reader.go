@@ -2,6 +2,7 @@ package cv
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"unicode"
@@ -50,6 +51,30 @@ func (c *CVReader) LoadCV() (string, error) {
 	if _, err := os.Stat(c.cvPath); os.IsNotExist(err) {
 		c.logger.Error("CV file not found: %v", err)
 		return c.getFallbackCV(), nil
+	}
+
+	// Support plain-text CV formats directly (e.g. Markdown).
+	if c.isTextCVFile() {
+		raw, err := os.ReadFile(c.cvPath)
+		if err != nil {
+			c.logger.Error("Failed to read CV text file: %v", err)
+			c.cvText = c.getFallbackCV()
+			return c.cvText, nil
+		}
+
+		cleaned := c.cleanText(string(raw))
+		if !c.isValidText(cleaned) {
+			c.logger.Warning("CV text file content looks invalid, using fallback CV")
+			c.cvText = c.getFallbackCV()
+			return c.cvText, nil
+		}
+
+		c.cvText = cleaned
+		if c.policy.LogParserUsed {
+			c.logger.Info("CV loaded successfully using text parser (%d chars)", len(c.cvText))
+		}
+		c.logger.Debug("CV preview: %s", c.getPreview(c.cvText, 200))
+		return c.cvText, nil
 	}
 
 	type extractionCandidate struct {
@@ -295,6 +320,16 @@ func (c *CVReader) shouldUseUniPDF() bool {
 		return true
 	}
 	return c.policy.EnableUniPDF
+}
+
+func (c *CVReader) isTextCVFile() bool {
+	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(c.cvPath)))
+	switch ext {
+	case ".md", ".markdown", ".txt":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *CVReader) Clear() {

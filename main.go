@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,9 +93,7 @@ func main() {
 		// Check if we've already run startup processing recently (within 30 minutes)
 		hasRunRecently := checkStartupFlag(cfg.App.DataDir)
 
-		if isDevMode {
-			logger.Info("Skipping initial job processing in development mode (hot reload detected)")
-		} else if hasRunRecently {
+		if hasRunRecently {
 			logger.Info("Skipping initial job processing (already ran within 30 minutes)")
 		} else {
 			logger.Info("Running initial job processing (RUN_ON_STARTUP=true)")
@@ -109,6 +108,30 @@ func main() {
 					}
 				}
 			}()
+		}
+
+		// In dev mode, run the job on a schedule (internal cron) since Cloud Scheduler isn't available
+		if isDevMode {
+			intervalMinutes := 60
+			if v := os.Getenv("DEV_CRON_INTERVAL_MINUTES"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil {
+					intervalMinutes = n
+				}
+			}
+			if intervalMinutes > 0 {
+				interval := time.Duration(intervalMinutes) * time.Minute
+				logger.Info("⏰ Dev cron enabled: running job every %s", interval)
+				go func() {
+					ticker := time.NewTicker(interval)
+					defer ticker.Stop()
+					for range ticker.C {
+						logger.Info("🔄 Dev cron: running job processing")
+						if err := jobController.SearchAndFilterJobs(); err != nil {
+							logger.Error("Dev cron failed: %v", err)
+						}
+					}
+				}()
+			}
 		}
 	} else {
 		logger.Info("Skipping initial job processing (RUN_ON_STARTUP=false)")

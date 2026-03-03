@@ -95,6 +95,8 @@ Set in `config/config.json`:
 { "cv": { "path": "your_cv.pdf" } }
 ```
 
+You can provide either a PDF (`.pdf`) or a text CV file (`.md`, `.markdown`, `.txt`).
+
 ### Scheduling
 
 - **Local**: the app starts an HTTP server and can run on startup.
