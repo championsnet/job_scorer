@@ -82,7 +82,7 @@ func (cs *GCSCheckpointService) SaveDailySnapshot(allJobs, promisingJobs, finalJ
 
 	emailCount := 0
 	for _, job := range finalJobs {
-		if job.ShouldSendEmail {
+		if job.FinalScore != nil {
 			emailCount++
 		}
 	}
@@ -137,7 +137,7 @@ func (cs *GCSCheckpointService) ListCheckpoints() (map[string][]string, error) {
 // LoadCheckpoint loads a specific checkpoint file from GCS
 func (cs *GCSCheckpointService) LoadCheckpoint(dateFolder, filename string) ([]*models.Job, error) {
 	gcsPath := fmt.Sprintf("checkpoints/%s/%s", dateFolder, filename)
-	
+
 	data, err := cs.gcsStorage.DownloadData(gcsPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load checkpoint from GCS: %w", err)
@@ -146,13 +146,46 @@ func (cs *GCSCheckpointService) LoadCheckpoint(dateFolder, filename string) ([]*
 	var checkpoint struct {
 		Jobs []*models.Job `json:"jobs"`
 	}
-	
+
 	if err := json.Unmarshal(data, &checkpoint); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal checkpoint data: %w", err)
 	}
 
 	cs.logger.Info("Loaded checkpoint from GCS: %s with %d jobs", gcsPath, len(checkpoint.Jobs))
 	return checkpoint.Jobs, nil
+}
+
+// LoadCheckpointByStage finds and loads the most recent checkpoint for a stage in a run folder
+func (cs *GCSCheckpointService) LoadCheckpointByStage(runID, stage string) ([]*models.Job, error) {
+	if runID == "" || stage == "" {
+		return nil, fmt.Errorf("run_id and stage are required")
+	}
+	prefix := fmt.Sprintf("checkpoints/%s/", runID)
+	files, err := cs.gcsStorage.ListFiles(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list checkpoints from GCS: %w", err)
+	}
+	stagePrefix := "checkpoint_" + stage + "_"
+	var bestPath string
+	var bestFilename string
+	for _, f := range files {
+		pathParts := strings.Split(f, "/")
+		if len(pathParts) < 3 {
+			continue
+		}
+		filename := pathParts[len(pathParts)-1]
+		if !strings.HasSuffix(filename, ".json") || len(filename) < len(stagePrefix) || filename[:len(stagePrefix)] != stagePrefix {
+			continue
+		}
+		if bestPath == "" || filename > bestFilename {
+			bestPath = f
+			bestFilename = filename
+		}
+	}
+	if bestPath == "" {
+		return nil, nil
+	}
+	return cs.LoadCheckpoint(runID, bestFilename)
 }
 
 // LoadCheckpointLegacy loads a legacy checkpoint file (compatibility method)

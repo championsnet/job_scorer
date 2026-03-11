@@ -50,9 +50,9 @@
   },
   "evaluation": {
     "initialPromptTemplate": "Rate job 0-10 for candidate targeting entry-level roles in configured locations.\n\nGOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR\nBAD FIELDS: Engineering, Data Science, Finance, Legal, Medical\nGOOD LEVEL: Entry, Junior, Intern, Graduate, Trainee, Assistant\nBAD LEVEL: Senior, Lead, Director, 5+ years\n\nJob: \"{{POSITION}}\" at {{COMPANY}} ({{LOCATION}})\n\nRespond JSON only:\n{\"score\": X, \"recommend\": true/false, \"reasons\": [\"brief reason\"]}",
-    "finalPromptTemplate": "CV vs Job match analysis (0-10).\n\nRED FLAGS (score=0): Required language that does not match candidate profile\nMATCH: Skills, experience level (0-2yrs), configured target locations\nSKILLS: Marketing, Business Dev, Operations, Admin, Strategy, HR\n\nCV:\n{{CV}}\n\nJob: \"{{POSITION}}\" at {{COMPANY}} ({{LOCATION}})\nDescription: {{JOB_DESCRIPTION}}\n\nJSON only:\n{\"finalScore\": X, \"shouldApply\": true/false, \"reasons\": [\"key reason\"]}",
+    "finalPromptTemplate": "CV vs Job match analysis (0-10).\n\nRED FLAGS (score=0): Required language that does not match candidate profile\nMATCH: Skills, experience level (0-2yrs), configured target locations\nSKILLS: Marketing, Business Dev, Operations, Admin, Strategy, HR\n\nCV:\n{{CV}}\n\nJob: \"{{POSITION}}\" at {{COMPANY}} ({{LOCATION}})\nDescription: {{JOB_DESCRIPTION}}\n\nJSON only:\n{\"finalScore\": X, \"reasons\": [\"key reason\"]}",
     "batchPromptTemplate": "Rate jobs 0-10 for candidate targeting entry-level roles in configured locations.\n\nGOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR\nBAD FIELDS: Engineering, Data Science, Finance, Legal, Medical\nGOOD LEVEL: Entry, Junior, Intern, Graduate, Trainee, Assistant\nBAD LEVEL: Senior, Lead, Director, 5+ years\n\n{{JOBS}}\nRespond with JSON array:\n[{\"jobId\": 1, \"score\": X, \"recommend\": true/false, \"reasons\": [\"brief reason\"]}, ...]",
-    "validationPromptTemplate": "Validate job recommendation. Check for: wrong field, seniority, German requirements, skill mismatch.\n\nCV: {{CV}}\n\nJob: {{JOB_DESCRIPTION}}\nPrevious: score={{FINAL_SCORE}}, apply={{SHOULD_APPLY}}, reasons={{FINAL_REASONS}}\n\nJSON only: {\"valid\": true/false, \"reason\": \"brief\"}",
+    "validationPromptTemplate": "Validate job recommendation. Check for: wrong field, seniority, German requirements, skill mismatch.\n\nCV: {{CV}}\n\nJob: {{JOB_DESCRIPTION}}\nPrevious: score={{FINAL_SCORE}}, reasons={{FINAL_REASONS}}\n\nJSON only: {\"valid\": true/false, \"reason\": \"brief\"}",
     "maxTokens": {
       "initial": 256,
       "final": 512,
@@ -84,8 +84,6 @@
   },
   "notification": {
     "minFinalScore": 0,
-    "requireShouldSendEmail": true,
-    "requireFinalScore": true,
     "emailSubjectTemplate": "Job Alert: {{COUNT}} New Recommended Jobs Found!",
     "headerTitle": "New Job Recommendations",
     "headerSubtitle": "Your personalized job matches are ready!",

@@ -13,68 +13,53 @@ func TestParseFinalEvaluationResponse(t *testing.T) {
 	tests := []struct {
 		response        string
 		expectedScore   *float64
-		expectedEmail   bool
 		expectedReason  string
 		expectedReasons []string
 	}{
 		{
 			response: `Final Score: 8
-Should Send Email: YES
 Reason: This is a great match`,
 			expectedScore:   float64Ptr(8.0),
-			expectedEmail:   true,
 			expectedReason:  "This is a great match",
 			expectedReasons: []string{"This is a great match"},
 		},
 		{
 			response: `Final Score: 4
-Should Send Email: NO
 Reason: Not a good fit`,
 			expectedScore:   float64Ptr(4.0),
-			expectedEmail:   false,
 			expectedReason:  "Not a good fit",
 			expectedReasons: []string{"Not a good fit"},
 		},
 		{
 			response: `Final Score: 7
-Send Email: YES
 Reason: Good opportunity`,
 			expectedScore:   float64Ptr(7.0),
-			expectedEmail:   true,
 			expectedReason:  "Good opportunity",
 			expectedReasons: []string{"Good opportunity"},
 		},
 		{
 			response: `Final Score: 9
-Should Send Email: Yes
 Reason: Perfect match`,
 			expectedScore:   float64Ptr(9.0),
-			expectedEmail:   true,
 			expectedReason:  "Perfect match",
 			expectedReasons: []string{"Perfect match"},
 		},
 		{
 			response: `{
   "finalScore": 8,
-  "shouldApply": true,
   "reasons": ["Great match for skills", "Good company culture", "Opportunity for growth"]
 }`,
 			expectedScore:   float64Ptr(8.0),
-			expectedEmail:   true,
 			expectedReason:  "Great match for skills",
 			expectedReasons: []string{"Great match for skills", "Good company culture", "Opportunity for growth"},
 		},
 	}
 	
 	for i, test := range tests {
-		score, email, reason, reasons := evaluator.parseFinalEvaluationResponse(test.response)
+		score, reason, reasons := evaluator.parseFinalEvaluationResponse(test.response)
 		
 		if !float64Equal(score, test.expectedScore) {
 			t.Errorf("Test %d: Expected score %v, got %v", i, test.expectedScore, score)
-		}
-		
-		if email != test.expectedEmail {
-			t.Errorf("Test %d: Expected email %t, got %t", i, test.expectedEmail, email)
 		}
 		
 		if reason != test.expectedReason {
@@ -189,13 +174,13 @@ func TestParseFinalEvaluationResponseWithMarkdownCodeBlock(t *testing.T) {
 	logger := utils.NewLogger("TestEvaluator")
 	
 	// Test the specific format that was failing in the logs - JSON wrapped in markdown code blocks
-	jsonResponseWithMarkdown := "```json\n{\n  \"finalScore\": 7,\n  \"shouldApply\": true,\n  \"reasons\": [\n    \"Strong business development, marketing, and operations experience aligns well with job requirements.\",\n    \"Proven experience in client relationship management and pipeline development.\",\n    \"Fluency in English matches the language requirement.\"\n  ]\n}\n```"
+	jsonResponseWithMarkdown := "```json\n{\n  \"finalScore\": 7,\n  \"reasons\": [\n    \"Strong business development, marketing, and operations experience aligns well with job requirements.\",\n    \"Proven experience in client relationship management and pipeline development.\",\n    \"Fluency in English matches the language requirement.\"\n  ]\n}\n```"
 
 	evaluator := &Evaluator{
 		logger: logger,
 	}
 
-	score, shouldApply, reason, reasons := evaluator.parseFinalEvaluationResponse(jsonResponseWithMarkdown)
+	score, reason, reasons := evaluator.parseFinalEvaluationResponse(jsonResponseWithMarkdown)
 
 	// Verify score
 	if score == nil {
@@ -203,11 +188,6 @@ func TestParseFinalEvaluationResponseWithMarkdownCodeBlock(t *testing.T) {
 	}
 	if *score != 7.0 {
 		t.Errorf("Expected score 7.0, got %.1f", *score)
-	}
-
-	// Verify shouldApply
-	if !shouldApply {
-		t.Error("Expected shouldApply to be true, got false")
 	}
 
 	// Verify reasons array

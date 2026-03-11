@@ -35,14 +35,14 @@ type FilterPolicy struct {
 	UnwantedLocations    []string `json:"unwantedLocations"`
 	UnwantedWordsInTitle []string `json:"unwantedWordsInTitle"`
 
-	PrimaryLanguage          string   `json:"primaryLanguage"`
-	DetectionLanguages       []string `json:"detectionLanguages"`
-	RedFlagLanguageKeywords  []string `json:"redFlagLanguageKeywords"`
-	RequiredLanguageKeywords []string `json:"requiredLanguageKeywords"` // Deprecated alias for backwards compatibility
+	PrimaryLanguage            string   `json:"primaryLanguage"`
+	DetectionLanguages         []string `json:"detectionLanguages"`
+	RedFlagLanguageKeywords    []string `json:"redFlagLanguageKeywords"`
+	RequiredLanguageKeywords   []string `json:"requiredLanguageKeywords"` // Deprecated alias for backwards compatibility
 	NonPrimaryLanguageKeywords []string `json:"nonPrimaryLanguageKeywords"`
 	PrimaryLanguageIndicators  []string `json:"primaryLanguageIndicators"`
 
-	NonPrimaryKeywordMinCount int     `json:"nonPrimaryKeywordMinCount"`
+	NonPrimaryKeywordMinCount    int     `json:"nonPrimaryKeywordMinCount"`
 	NonPrimaryDominanceThreshold float64 `json:"nonPrimaryDominanceThreshold"`
 	NonPrimaryDominanceRatio     float64 `json:"nonPrimaryDominanceRatio"`
 
@@ -88,8 +88,6 @@ type PipelinePolicy struct {
 
 type NotificationPolicy struct {
 	MinFinalScore              float64 `json:"minFinalScore"`
-	RequireShouldSendEmail     bool    `json:"requireShouldSendEmail"`
-	RequireFinalScore          bool    `json:"requireFinalScore"`
 	EmailSubjectTemplate       string  `json:"emailSubjectTemplate"`
 	HeaderTitle                string  `json:"headerTitle"`
 	HeaderSubtitle             string  `json:"headerSubtitle"`
@@ -106,32 +104,32 @@ type NotificationPolicy struct {
 }
 
 type CVPolicy struct {
-	Path                        string   `json:"path"`
-	ParserOrder                 []string `json:"parserOrder"`
-	EnableUniPDF                bool     `json:"enableUniPDF"`
-	FallbackText                string   `json:"fallbackText"`
-	MinValidTextLength          int      `json:"minValidTextLength"`
-	MinLetterRatio              float64  `json:"minLetterRatio"`
-	AllowEnvOverrideUniPDF      bool     `json:"allowEnvOverrideUniPDF"`
-	LogParserUsed               bool     `json:"logParserUsed"`
+	Path                         string   `json:"path"`
+	ParserOrder                  []string `json:"parserOrder"`
+	EnableUniPDF                 bool     `json:"enableUniPDF"`
+	FallbackText                 string   `json:"fallbackText"`
+	MinValidTextLength           int      `json:"minValidTextLength"`
+	MinLetterRatio               float64  `json:"minLetterRatio"`
+	AllowEnvOverrideUniPDF       bool     `json:"allowEnvOverrideUniPDF"`
+	LogParserUsed                bool     `json:"logParserUsed"`
 	ValidateCandidateByHeuristic bool     `json:"validateCandidateByHeuristic"`
 }
 
 type ScraperPolicy struct {
-	DateSincePosted           string `json:"dateSincePosted"`
-	PaginationBatchSize        int   `json:"paginationBatchSize"`
-	MaxConsecutiveErrors       int   `json:"maxConsecutiveErrors"`
-	MaxRequestRetries          int   `json:"maxRequestRetries"`
-	ConsecutiveBackoffBaseSecs int   `json:"consecutiveBackoffBaseSeconds"`
-	RetryBackoffBaseSecs       int   `json:"retryBackoffBaseSeconds"`
-	RetryJitterMaxMs           int   `json:"retryJitterMaxMs"`
-	InterBatchDelayMinMs       int   `json:"interBatchDelayMinMs"`
-	InterBatchDelayMaxMs       int   `json:"interBatchDelayMaxMs"`
-	DescriptionDelayMinMs      int   `json:"descriptionDelayMinMs"`
-	DescriptionDelayMaxMs      int   `json:"descriptionDelayMaxMs"`
-	DescriptionMaxLength       int   `json:"descriptionMaxLength"`
-	ErrorBodyPreviewLength     int   `json:"errorBodyPreviewLength"`
-	VerboseParseLogs           bool  `json:"verboseParseLogs"`
+	DateSincePosted            string   `json:"dateSincePosted"`
+	PaginationBatchSize        int      `json:"paginationBatchSize"`
+	MaxConsecutiveErrors       int      `json:"maxConsecutiveErrors"`
+	MaxRequestRetries          int      `json:"maxRequestRetries"`
+	ConsecutiveBackoffBaseSecs int      `json:"consecutiveBackoffBaseSeconds"`
+	RetryBackoffBaseSecs       int      `json:"retryBackoffBaseSeconds"`
+	RetryJitterMaxMs           int      `json:"retryJitterMaxMs"`
+	InterBatchDelayMinMs       int      `json:"interBatchDelayMinMs"`
+	InterBatchDelayMaxMs       int      `json:"interBatchDelayMaxMs"`
+	DescriptionDelayMinMs      int      `json:"descriptionDelayMinMs"`
+	DescriptionDelayMaxMs      int      `json:"descriptionDelayMaxMs"`
+	DescriptionMaxLength       int      `json:"descriptionMaxLength"`
+	ErrorBodyPreviewLength     int      `json:"errorBodyPreviewLength"`
+	VerboseParseLogs           bool     `json:"verboseParseLogs"`
 	Selectors                  []string `json:"selectors"`
 }
 
@@ -205,13 +203,13 @@ func defaultPolicy() Policy {
 				"you will", "we are", "join our", "opportunity", "experience",
 				"skills", "requirements", "responsibilities", "benefits",
 			},
-			NonPrimaryKeywordMinCount:       2,
-			NonPrimaryDominanceThreshold:    0.60,
-			NonPrimaryDominanceRatio:        1.50,
-			PrimaryIndicatorMinCount:        2,
-			PrimaryIndicatorMinConfidence:   0.40,
-			DefaultPrimaryThreshold:         0.45,
-			PrimaryVsNonPrimaryMinDelta:     0.10,
+			NonPrimaryKeywordMinCount:      2,
+			NonPrimaryDominanceThreshold:   0.60,
+			NonPrimaryDominanceRatio:       1.50,
+			PrimaryIndicatorMinCount:       2,
+			PrimaryIndicatorMinConfidence:  0.40,
+			DefaultPrimaryThreshold:        0.45,
+			PrimaryVsNonPrimaryMinDelta:    0.10,
 			MinTextLengthForLanguageDetect: 8,
 		},
 		Evaluation: EvaluationPolicy{
@@ -239,7 +237,7 @@ Job: "{{POSITION}}" at {{COMPANY}} ({{LOCATION}})
 Description: {{JOB_DESCRIPTION}}
 
 JSON only:
-{"finalScore": X, "shouldApply": true/false, "reasons": ["key reason"]}`,
+{"finalScore": X, "reasons": ["key reason"]}`,
 			BatchPromptTemplate: `Rate jobs 0-10 for candidate targeting entry-level roles in configured locations.
 
 GOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR
@@ -255,7 +253,7 @@ Respond with JSON array:
 CV: {{CV}}
 
 Job: {{JOB_DESCRIPTION}}
-Previous: score={{FINAL_SCORE}}, apply={{SHOULD_APPLY}}, reasons={{FINAL_REASONS}}
+Previous: score={{FINAL_SCORE}}, reasons={{FINAL_REASONS}}
 
 JSON only: {"valid": true/false, "reason": "brief"}`,
 			MaxTokens: MaxTokenMap{
@@ -286,8 +284,6 @@ JSON only: {"valid": true/false, "reason": "brief"}`,
 		},
 		Notification: NotificationPolicy{
 			MinFinalScore:              0,
-			RequireShouldSendEmail:     true,
-			RequireFinalScore:          true,
 			EmailSubjectTemplate:       "Job Alert: {{COUNT}} New Recommended Jobs Found!",
 			HeaderTitle:                "New Job Recommendations",
 			HeaderSubtitle:             "Your personalized job matches are ready!",
@@ -303,18 +299,18 @@ JSON only: {"valid": true/false, "reason": "brief"}`,
 			JobDescriptionPreviewLimit: 300,
 		},
 		CV: CVPolicy{
-			Path:                       "your_cv.pdf",
-			ParserOrder:                 []string{"unipdf", "fitz", "ledongthuc"},
-			EnableUniPDF:                false,
-			FallbackText:                "CV not available. Candidate background unavailable.",
-			MinValidTextLength:          40,
-			MinLetterRatio:              0.40,
-			AllowEnvOverrideUniPDF:      true,
-			LogParserUsed:               true,
+			Path:                         "your_cv.pdf",
+			ParserOrder:                  []string{"unipdf", "fitz", "ledongthuc"},
+			EnableUniPDF:                 false,
+			FallbackText:                 "CV not available. Candidate background unavailable.",
+			MinValidTextLength:           40,
+			MinLetterRatio:               0.40,
+			AllowEnvOverrideUniPDF:       true,
+			LogParserUsed:                true,
 			ValidateCandidateByHeuristic: true,
 		},
 		Scraper: ScraperPolicy{
-			DateSincePosted:           "past hour",
+			DateSincePosted:            "past hour",
 			PaginationBatchSize:        10,
 			MaxConsecutiveErrors:       3,
 			MaxRequestRetries:          3,
@@ -338,6 +334,11 @@ JSON only: {"valid": true/false, "reason": "brief"}`,
 			},
 		},
 	}
+}
+
+// DefaultPolicy returns the built-in policy defaults.
+func DefaultPolicy() Policy {
+	return defaultPolicy()
 }
 
 func applyPolicyDefaults(p *Policy) {

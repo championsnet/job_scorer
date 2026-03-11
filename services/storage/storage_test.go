@@ -132,7 +132,6 @@ func TestFileStorage_SaveFinalEvaluatedJobs(t *testing.T) {
 			Location:        "Basel",
 			Score:           &score,
 			FinalScore:      &score,
-			ShouldSendEmail: true,
 			CreatedAt:       time.Now(),
 		},
 	}

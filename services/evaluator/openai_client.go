@@ -276,6 +276,12 @@ func (g *OpenAIClient) GetUsageTotals() TokenUsageTotals {
 	return g.usageTotals
 }
 
+func (g *OpenAIClient) ResetUsageTotals() {
+	g.usageMutex.Lock()
+	defer g.usageMutex.Unlock()
+	g.usageTotals = TokenUsageTotals{}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

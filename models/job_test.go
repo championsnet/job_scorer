@@ -189,42 +189,26 @@ func TestJobIsPromising(t *testing.T) {
 
 func TestJobShouldNotify(t *testing.T) {
 	tests := []struct {
-		name            string
-		shouldSendEmail bool
-		finalScore      *float64
-		want            bool
+		name       string
+		finalScore *float64
+		want       bool
 	}{
 		{
-			name:            "Should send email with score",
-			shouldSendEmail: true,
-			finalScore:      floatPtr(8.0),
-			want:            true,
+			name:       "With final score",
+			finalScore: floatPtr(8.0),
+			want:       true,
 		},
 		{
-			name:            "Should send email but no final score",
-			shouldSendEmail: true,
-			finalScore:      nil,
-			want:            false,
-		},
-		{
-			name:            "Should not send email",
-			shouldSendEmail: false,
-			finalScore:      floatPtr(8.0),
-			want:            false,
-		},
-		{
-			name:            "Should not send email and no score",
-			shouldSendEmail: false,
-			finalScore:      nil,
-			want:            false,
+			name:       "Without final score",
+			finalScore: nil,
+			want:       false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			job := &Job{
-				ShouldSendEmail: tt.shouldSendEmail,
-				FinalScore:      tt.finalScore,
+				FinalScore: tt.finalScore,
 			}
 			got := job.ShouldNotify()
 			

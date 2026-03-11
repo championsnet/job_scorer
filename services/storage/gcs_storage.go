@@ -53,10 +53,7 @@ func NewGCSStorage(config GCSConfig) (*GCSStorage, error) {
 	// Create GCS client
 	client, err := storage.NewClient(gcs.ctx)
 	if err != nil {
-		logger.Error("Failed to create GCS client: %v", err)
-		logger.Warning("Falling back to local storage")
-		gcs.enabled = false
-		return gcs, nil
+		return nil, fmt.Errorf("failed to create GCS client: %w", err)
 	}
 
 	gcs.client = client
@@ -65,12 +62,8 @@ func NewGCSStorage(config GCSConfig) (*GCSStorage, error) {
 	bucket := client.Bucket(config.BucketName)
 	_, err = bucket.Attrs(gcs.ctx)
 	if err != nil {
-		logger.Error("Failed to access GCS bucket '%s': %v", config.BucketName, err)
-		logger.Warning("Falling back to local storage")
-		gcs.enabled = false
 		client.Close()
-		gcs.client = nil
-		return gcs, nil
+		return nil, fmt.Errorf("failed to access GCS bucket %q: %w", config.BucketName, err)
 	}
 
 	logger.Info("Successfully connected to GCS bucket: %s", config.BucketName)

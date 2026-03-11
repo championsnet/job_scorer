@@ -44,6 +44,7 @@ type AppConfig struct {
 	OutputDir             string
 	MaxJobs               int
 	EnableFinalValidation bool
+	ForceReeval           bool // skip cross-run duplicate filtering for this run
 }
 
 type RateLimitConfig struct {
@@ -118,7 +119,7 @@ func Load() (*Config, error) {
 		RateLimit: RateLimitConfig{
 			MaxRequests:        getEnvInt("MAX_REQUESTS_PER_MINUTE", 20),
 			TimeWindow:         time.Minute,
-			MaxTokensPerMinute: getEnvInt("MAX_TOKENS_PER_MINUTE", 5000),
+			MaxTokensPerMinute: getEnvInt("MAX_TOKENS_PER_MINUTE", 10000),
 		},
 		GCS: GCSConfig{
 			BucketName:  getEnv("GCS_BUCKET_NAME", ""),

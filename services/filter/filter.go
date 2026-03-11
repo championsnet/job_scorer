@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -67,51 +68,63 @@ func (f *Filter) PrefilterJobs(jobs []*models.Job) []*models.Job {
 }
 
 func (f *Filter) shouldIncludeJob(job *models.Job) bool {
+	return f.PrefilterReason(job) == ""
+}
+
+func (f *Filter) PrefilterReason(job *models.Job) string {
 	// Check for unwanted locations
 	for _, unwantedLocation := range f.unwantedLocations {
 		if strings.Contains(strings.ToLower(job.Location), strings.ToLower(unwantedLocation)) {
-			return false
+			return "Rejected due to unwanted location filter"
 		}
 	}
 
 	// Check for unwanted words in title
 	for _, unwantedWord := range f.unwantedWordsInTitle {
 		if strings.Contains(strings.ToLower(job.Position), strings.ToLower(unwantedWord)) {
-			return false
+			return "Rejected due to unwanted title keyword filter"
 		}
 	}
 
 	// Check if job title is in configured primary language.
-	if !f.isEnglishText(job.Position) {
-		return false
+	if reason := f.languageRejectionReason(job.Position); reason != "" {
+		return reason
 	}
 
-	return true
+	return ""
 }
 
 func (f *Filter) isEnglishText(text string) bool {
+	return f.languageRejectionReason(text) == ""
+}
+
+func (f *Filter) languageRejectionReason(text string) string {
 	if strings.TrimSpace(text) == "" {
-		return true // Allow empty text
+		return ""
 	}
 
 	cleanedText := f.cleanTextForDetection(text)
 	if len(cleanedText) < f.policy.MinTextLengthForLanguageDetect {
-		return true // Too short to reliably detect
+		return ""
 	}
 
 	// Multi-layer language detection
-	return f.enhancedLanguageDetection(cleanedText)
+	return f.enhancedLanguageDetectionReason(cleanedText)
 }
 
 // Enhanced language detection with multiple validation layers
 func (f *Filter) enhancedLanguageDetection(text string) bool {
+	return f.enhancedLanguageDetectionReason(text) == ""
+}
+
+func (f *Filter) enhancedLanguageDetectionReason(text string) string {
 	textLower := strings.ToLower(text)
 
 	// Layer 1: Check for explicit red-flag language requirements (immediate rejection).
 	for _, keyword := range f.policy.RedFlagLanguageKeywords {
 		if strings.Contains(textLower, keyword) {
 			f.logger.Debug("Rejected due to red-flag language keyword: %s", keyword)
-			return false
+			return "Rejected due to red-flag language keyword: " + keyword
 		}
 	}
 
@@ -125,7 +138,7 @@ func (f *Filter) enhancedLanguageDetection(text string) bool {
 
 	if nonPrimaryKeywordCount >= f.policy.NonPrimaryKeywordMinCount {
 		f.logger.Debug("Rejected due to %d non-primary language keywords", nonPrimaryKeywordCount)
-		return false
+		return fmt.Sprintf("Rejected due to %d non-primary language keywords", nonPrimaryKeywordCount)
 	}
 
 	// Layer 3: Primary language confidence vs strongest non-primary language.
@@ -149,7 +162,8 @@ func (f *Filter) enhancedLanguageDetection(text string) bool {
 		maxOtherConfidence > primaryConfidence*f.policy.NonPrimaryDominanceRatio {
 		f.logger.Debug("Rejected due to non-primary confidence %.2f vs primary %.2f",
 			maxOtherConfidence, primaryConfidence)
-		return false
+		return fmt.Sprintf("Rejected due to non-primary confidence %.2f vs primary %.2f",
+			maxOtherConfidence, primaryConfidence)
 	}
 
 	primaryIndicatorCount := 0
@@ -164,7 +178,7 @@ func (f *Filter) enhancedLanguageDetection(text string) bool {
 		primaryConfidence >= maxOtherConfidence+f.policy.PrimaryVsNonPrimaryMinDelta {
 		f.logger.Debug("Accepted due to %d primary-language indicators and %.2f confidence",
 			primaryIndicatorCount, primaryConfidence)
-		return true
+		return ""
 	}
 
 	result := primaryConfidence >= f.policy.DefaultPrimaryThreshold &&
@@ -172,9 +186,10 @@ func (f *Filter) enhancedLanguageDetection(text string) bool {
 
 	if !result {
 		f.logger.Debug("Rejected due to language confidence (Primary: %.2f, Non-primary: %.2f)", primaryConfidence, maxOtherConfidence)
+		return fmt.Sprintf("Rejected due to language confidence (Primary: %.2f, Non-primary: %.2f)", primaryConfidence, maxOtherConfidence)
 	}
 
-	return result
+	return ""
 }
 
 // Helper function to get minimum of two integers
@@ -196,6 +211,16 @@ func (f *Filter) FilterPromisingJobs(jobs []*models.Job, threshold float64) []*m
 
 	f.logger.Info("Found %d promising jobs (score >= %.1f)", len(promisingJobs), threshold)
 	return promisingJobs
+}
+
+func (f *Filter) PromisingExclusionReason(job *models.Job, threshold float64) string {
+	if job.Score == nil {
+		return "Excluded because the initial LLM evaluation did not produce a score"
+	}
+	if *job.Score < threshold {
+		return "Excluded because the initial score was below the promising threshold"
+	}
+	return ""
 }
 
 func (f *Filter) FilterNotificationJobs(jobs []*models.Job) []*models.Job {
@@ -230,16 +255,17 @@ func (f *Filter) FilterNotificationJobs(jobs []*models.Job) []*models.Job {
 }
 
 func (f *Filter) shouldNotify(job *models.Job) bool {
-	if f.notificationPolicy.RequireShouldSendEmail && !job.ShouldSendEmail {
-		return false
+	return f.NotificationExclusionReason(job) == ""
+}
+
+func (f *Filter) NotificationExclusionReason(job *models.Job) string {
+	if job.FinalScore == nil {
+		return "Excluded because CV evaluation did not produce a final score"
 	}
-	if f.notificationPolicy.RequireFinalScore && job.FinalScore == nil {
-		return false
+	if *job.FinalScore < f.notificationPolicy.MinFinalScore {
+		return "Excluded because the final score was below the notification threshold"
 	}
-	if job.FinalScore != nil && *job.FinalScore < f.notificationPolicy.MinFinalScore {
-		return false
-	}
-	return true
+	return ""
 }
 
 // FilterJobDescription filters out jobs that are not in primary language.

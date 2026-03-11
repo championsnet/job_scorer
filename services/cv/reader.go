@@ -10,7 +10,6 @@ import (
 	"job-scorer/config"
 	"job-scorer/utils"
 
-	"github.com/gen2brain/go-fitz"
 	"github.com/ledongthuc/pdf"
 	"github.com/unidoc/unipdf/v3/common/license"
 	"github.com/unidoc/unipdf/v3/extractor"
@@ -95,8 +94,6 @@ func (c *CVReader) LoadCV() (string, error) {
 				continue
 			}
 			extractedText, err = c.extractTextWithUniPDF()
-		case "fitz":
-			extractedText, err = c.extractTextWithFitz()
 		case "ledongthuc":
 			extractedText, err = c.extractTextFromPDF()
 		default:
@@ -173,32 +170,6 @@ func (c *CVReader) extractTextWithUniPDF() (string, error) {
 		textBuilder.WriteString(text)
 		textBuilder.WriteString("\n")
 	}
-	return textBuilder.String(), nil
-}
-
-func (c *CVReader) extractTextWithFitz() (string, error) {
-	doc, err := fitz.New(c.cvPath)
-	if err != nil {
-		return "", err
-	}
-	defer doc.Close()
-
-	var textBuilder strings.Builder
-	totalPages := doc.NumPage()
-	c.logger.Info("PDF has %d pages (go-fitz)", totalPages)
-
-	for pageNum := 0; pageNum < totalPages; pageNum++ {
-		// Extract text from the page
-		text, err := doc.Text(pageNum)
-		if err != nil {
-			c.logger.Warning("Error extracting text from page %d: %v", pageNum, err)
-			continue
-		}
-
-		textBuilder.WriteString(text)
-		textBuilder.WriteString("\n")
-	}
-
 	return textBuilder.String(), nil
 }
 

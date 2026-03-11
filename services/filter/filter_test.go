@@ -33,9 +33,7 @@ func testPolicies() (config.FilterPolicy, config.NotificationPolicy) {
 		PrimaryVsNonPrimaryMinDelta:     0.05,
 		MinTextLengthForLanguageDetect: 8,
 	}, config.NotificationPolicy{
-		MinFinalScore:          0,
-		RequireShouldSendEmail: true,
-		RequireFinalScore:      true,
+		MinFinalScore: 7.0,
 	}
 }
 
@@ -164,7 +162,6 @@ func TestFilter_FilterNotificationJobs(t *testing.T) {
 			Location:        "Basel, Switzerland",
 			Score:           &score1,
 			FinalScore:      &score1,
-			ShouldSendEmail: true,
 		},
 		{
 			Position:        "Data Scientist",
@@ -172,7 +169,6 @@ func TestFilter_FilterNotificationJobs(t *testing.T) {
 			Location:        "Zurich, Switzerland",
 			Score:           &score2,
 			FinalScore:      &score2,
-			ShouldSendEmail: false,
 		},
 		{
 			Position:        "Marketing Manager",
@@ -180,13 +176,12 @@ func TestFilter_FilterNotificationJobs(t *testing.T) {
 			Location:        "Basel, Switzerland",
 			Score:           &score1,
 			FinalScore:      &score1,
-			ShouldSendEmail: true,
 		},
 	}
 	
 	filtered := filter.FilterNotificationJobs(jobs)
 	
-	expectedCount := 2 // Only jobs with ShouldSendEmail = true
+	expectedCount := 2 // Only jobs with FinalScore >= minFinalScore (7.0)
 	if len(filtered) != expectedCount {
 		t.Errorf("FilterNotificationJobs() returned %d jobs, want %d", len(filtered), expectedCount)
 	}

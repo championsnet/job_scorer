@@ -129,7 +129,7 @@ func (cs *CheckpointService) SaveDailySnapshot(allJobs, promisingJobs, finalJobs
 
 	emailCount := 0
 	for _, job := range finalJobs {
-		if job.ShouldSendEmail {
+		if job.FinalScore != nil {
 			emailCount++
 		}
 	}
@@ -197,9 +197,9 @@ func (cs *CheckpointService) ListCheckpoints() (map[string][]string, error) {
 
 // LoadCheckpoint loads a specific checkpoint file from a date folder
 func (cs *CheckpointService) LoadCheckpoint(dateFolder, filename string) ([]*models.Job, error) {
-	filepath := filepath.Join(cs.checkpointDir, dateFolder, filename)
-	
-	data, err := os.ReadFile(filepath)
+	path := filepath.Join(cs.checkpointDir, dateFolder, filename)
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint file: %w", err)
 	}
@@ -207,13 +207,53 @@ func (cs *CheckpointService) LoadCheckpoint(dateFolder, filename string) ([]*mod
 	var checkpoint struct {
 		Jobs []*models.Job `json:"jobs"`
 	}
-	
+
 	if err := json.Unmarshal(data, &checkpoint); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal checkpoint data: %w", err)
 	}
 
 	cs.logger.Info("Loaded checkpoint: %s/%s with %d jobs", dateFolder, filename, len(checkpoint.Jobs))
 	return checkpoint.Jobs, nil
+}
+
+// LoadCheckpointByStage finds and loads the most recent checkpoint for a stage in a run folder
+func (cs *CheckpointService) LoadCheckpointByStage(runID, stage string) ([]*models.Job, error) {
+	if runID == "" || stage == "" {
+		return nil, fmt.Errorf("run_id and stage are required")
+	}
+	runDir := filepath.Join(cs.checkpointDir, runID)
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read run directory: %w", err)
+	}
+	prefix := "checkpoint_" + stage + "_"
+	var bestFilename string
+	var bestModTime int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if filepath.Ext(name) != ".json" || len(name) < len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		mod := info.ModTime().Unix()
+		if mod > bestModTime {
+			bestModTime = mod
+			bestFilename = name
+		}
+	}
+	if bestFilename == "" {
+		return nil, nil
+	}
+	return cs.LoadCheckpoint(runID, bestFilename)
 }
 
 // LoadCheckpointLegacy loads a legacy checkpoint file from root directory

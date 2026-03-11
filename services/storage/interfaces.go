@@ -2,6 +2,7 @@ package storage
 
 import (
 	"job-scorer/models"
+
 	"time"
 )
 
@@ -37,6 +38,14 @@ type CheckpointStorage interface {
 	SaveDailySnapshot(allJobs, promisingJobs, finalJobs []*models.Job) error
 	ListCheckpoints() (map[string][]string, error)
 	LoadCheckpoint(dateFolder, filename string) ([]*models.Job, error)
+	LoadCheckpointByStage(runID, stage string) ([]*models.Job, error)
 	LoadCheckpointLegacy(filename string) ([]*models.Job, error)
 	CleanupOldCheckpoints(daysToKeep int) error
+}
+
+// RunSummaryStore interface for persisting and listing run summaries
+type RunSummaryStore interface {
+	SaveRunSummary(summary *models.RunSummary) error
+	LoadRunSummary(runID string) (*models.RunSummary, error)
+	ListRunSummaries(limit int) ([]*models.RunSummary, error)
 } 

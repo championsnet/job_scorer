@@ -20,25 +20,19 @@ type Job struct {
 	Score           *float64  `json:"score,omitempty"`
 	Reason          string    `json:"reason,omitempty"`       // For backward compatibility
 	Reasons         []string  `json:"reasons,omitempty"`      // Array of reasons from initial evaluation
+	Excluded        bool      `json:"excluded,omitempty"`
+	ExclusionReason string    `json:"exclusionReason,omitempty"`
 	JobDescription  string    `json:"jobDescription,omitempty"`
 	FinalScore      *float64  `json:"finalScore,omitempty"`
-	ShouldSendEmail bool      `json:"shouldSendEmail,omitempty"`
 	FinalReason     string    `json:"finalReason,omitempty"`  // For backward compatibility
 	FinalReasons    []string  `json:"finalReasons,omitempty"` // Array of reasons from final evaluation
 	CreatedAt       time.Time `json:"createdAt"`
 }
 
-type JobEvaluation struct {
-	Job    Job      `json:"job"`
-	Score  *float64 `json:"score"`
-	Reason string   `json:"reason"`
-}
-
 type FinalEvaluation struct {
-	Job             Job      `json:"job"`
-	FinalScore      *float64 `json:"finalScore"`
-	ShouldSendEmail bool     `json:"shouldSendEmail"`
-	FinalReason     string   `json:"finalReason"`
+	Job        Job      `json:"job"`
+	FinalScore *float64 `json:"finalScore"`
+	FinalReason string  `json:"finalReason"`
 }
 
 // ExtractJobID extracts the job ID from a LinkedIn job URL
@@ -106,5 +100,5 @@ func (j *Job) IsPromising(threshold float64) bool {
 }
 
 func (j *Job) ShouldNotify() bool {
-	return j.ShouldSendEmail && j.FinalScore != nil
+	return j.FinalScore != nil
 } 

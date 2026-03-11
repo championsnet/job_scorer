@@ -96,10 +96,9 @@ func (e *Evaluator) EvaluateJobWithCV(job *models.Job) (*models.Job, error) {
 		if !e.filter.FilterJobDescription(job) {
 			e.logger.Warning("Filtered out non-English job description: %s at %s", job.Position, job.Company)
 
-			// Set a low score and don't send email for non-English job descriptions
+			// Set a low score for non-primary-language job descriptions
 			zeroScore := 0.0
 			job.FinalScore = &zeroScore
-			job.ShouldSendEmail = false
 			job.FinalReason = "Job description is not in English"
 			job.FinalReasons = []string{"Job description is not in English"}
 
@@ -133,19 +132,18 @@ func (e *Evaluator) EvaluateJobWithCV(job *models.Job) (*models.Job, error) {
 	}
 
 	e.logger.Debug("Raw final evaluation response for %s: %s", job.Position, response)
-	finalScore, shouldSendEmail, finalReason, finalReasons := e.parseFinalEvaluationResponse(response)
+	finalScore, finalReason, finalReasons := e.parseFinalEvaluationResponse(response)
 	job.FinalScore = finalScore
-	job.ShouldSendEmail = shouldSendEmail
 	job.FinalReason = finalReason   // For backward compatibility
 	job.FinalReasons = finalReasons // Store all reasons
 
 	if finalScore != nil {
 		if len(finalReasons) > 0 {
-			e.logger.Info("Final score for '%s' at '%s': %.1f, Send email: %t, Reasons: %v",
-				job.Position, job.Company, *finalScore, shouldSendEmail, finalReasons)
+			e.logger.Info("Final score for '%s' at '%s': %.1f, Reasons: %v",
+				job.Position, job.Company, *finalScore, finalReasons)
 		} else {
-			e.logger.Info("Final score for '%s' at '%s': %.1f, Send email: %t, Reason: %s",
-				job.Position, job.Company, *finalScore, shouldSendEmail, finalReason)
+			e.logger.Info("Final score for '%s' at '%s': %.1f, Reason: %s",
+				job.Position, job.Company, *finalScore, finalReason)
 		}
 	}
 
@@ -349,9 +347,8 @@ type EvaluationResponse struct {
 }
 
 type FinalEvaluationResponse struct {
-	FinalScore  float64  `json:"finalScore"`
-	ShouldApply bool     `json:"shouldApply"`
-	Reasons     []string `json:"reasons"`
+	FinalScore float64  `json:"finalScore"`
+	Reasons    []string `json:"reasons"`
 }
 
 type ParsedEvaluationResult struct {
@@ -361,10 +358,9 @@ type ParsedEvaluationResult struct {
 }
 
 type ParsedFinalEvaluationResult struct {
-	FinalScore      *float64
-	ShouldSendEmail bool
-	FinalReason     string
-	FinalReasons    []string
+	FinalScore   *float64
+	FinalReason  string
+	FinalReasons []string
 }
 
 // validateEvaluationResponse validates the structure and content of evaluation response
@@ -481,10 +477,9 @@ func (e *Evaluator) parseStructuredFinalEvaluationResponse(response string) *Par
 				reason = finalResp.Reasons[0]
 			}
 			return &ParsedFinalEvaluationResult{
-				FinalScore:      &finalResp.FinalScore,
-				ShouldSendEmail: finalResp.ShouldApply,
-				FinalReason:     reason,
-				FinalReasons:    finalResp.Reasons,
+				FinalScore:   &finalResp.FinalScore,
+				FinalReason:  reason,
+				FinalReasons: finalResp.Reasons,
 			}
 		} else {
 			e.logger.Debug("JSON parsed but validation failed: %v", validateErr)
@@ -503,10 +498,9 @@ func (e *Evaluator) parseStructuredFinalEvaluationResponse(response string) *Par
 					reason = finalResp.Reasons[0]
 				}
 				return &ParsedFinalEvaluationResult{
-					FinalScore:      &finalResp.FinalScore,
-					ShouldSendEmail: finalResp.ShouldApply,
-					FinalReason:     reason,
-					FinalReasons:    finalResp.Reasons,
+					FinalScore:   &finalResp.FinalScore,
+					FinalReason:  reason,
+					FinalReasons: finalResp.Reasons,
 				}
 			}
 		}
@@ -522,10 +516,9 @@ func (e *Evaluator) parseStructuredFinalEvaluationResponse(response string) *Par
 					reason = finalResp.Reasons[0]
 				}
 				return &ParsedFinalEvaluationResult{
-					FinalScore:      &finalResp.FinalScore,
-					ShouldSendEmail: finalResp.ShouldApply,
-					FinalReason:     reason,
-					FinalReasons:    finalResp.Reasons,
+					FinalScore:   &finalResp.FinalScore,
+					FinalReason:  reason,
+					FinalReasons: finalResp.Reasons,
 				}
 			}
 		}
@@ -659,19 +652,18 @@ func (e *Evaluator) parseEvaluationResponse(response string) (*float64, string, 
 	return score, reason, reasons
 }
 
-func (e *Evaluator) parseFinalEvaluationResponse(response string) (*float64, bool, string, []string) {
+func (e *Evaluator) parseFinalEvaluationResponse(response string) (*float64, string, []string) {
 	// Clean the response first
 	cleanedResponse := e.cleanResponse(response)
 	e.logger.Debug("Parsing final evaluation response: %s", cleanedResponse)
 
 	// Try structured parsing with validation
 	if result := e.parseStructuredFinalEvaluationResponse(cleanedResponse); result != nil {
-		return result.FinalScore, result.ShouldSendEmail, result.FinalReason, result.FinalReasons
+		return result.FinalScore, result.FinalReason, result.FinalReasons
 	}
 
 	// Enhanced regex parsing for final evaluation
 	var finalScore *float64
-	var shouldSendEmail bool
 	var finalReason string
 	var finalReasons []string
 
@@ -694,28 +686,6 @@ func (e *Evaluator) parseFinalEvaluationResponse(response string) (*float64, boo
 				e.logger.Debug("Found final score using pattern %s: %.1f", pattern.String(), *finalScore)
 				break
 			}
-		}
-	}
-
-	// Multiple patterns for should send email
-	emailPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`"shouldApply"\s*:\s*(true|false)`),
-		regexp.MustCompile(`shouldApply\s*:\s*(true|false)`),
-		regexp.MustCompile(`"shouldSendEmail"\s*:\s*(true|false)`),
-		regexp.MustCompile(`shouldSendEmail\s*:\s*(true|false)`),
-		regexp.MustCompile(`Should Send Email\s*:\s*(YES|NO|Yes|No|yes|no)`),
-		regexp.MustCompile(`Send Email\s*:\s*(YES|NO|Yes|No|yes|no)`),
-		regexp.MustCompile(`Should Apply\s*:\s*(YES|NO|Yes|No|yes|no)`),
-		regexp.MustCompile(`Apply\s*:\s*(YES|NO|Yes|No|yes|no)`),
-	}
-
-	for _, pattern := range emailPatterns {
-		emailMatch := pattern.FindStringSubmatch(cleanedResponse)
-		if len(emailMatch) > 1 {
-			value := strings.ToLower(emailMatch[1])
-			shouldSendEmail = value == "true" || value == "yes"
-			e.logger.Debug("Found email pattern %s: %s, result: %t", pattern.String(), emailMatch[1], shouldSendEmail)
-			break
 		}
 	}
 
@@ -766,9 +736,9 @@ func (e *Evaluator) parseFinalEvaluationResponse(response string) (*float64, boo
 		finalReasons = []string{finalReason}
 	}
 
-	e.logger.Debug("Parsed - Final Score: %v, Should Send Email: %t, Reason: %s, Reasons: %v",
-		finalScore, shouldSendEmail, finalReason, finalReasons)
-	return finalScore, shouldSendEmail, finalReason, finalReasons
+	e.logger.Debug("Parsed - Final Score: %v, Reason: %s, Reasons: %v",
+		finalScore, finalReason, finalReasons)
+	return finalScore, finalReason, finalReasons
 }
 
 // ValidateFinalEvaluation runs a second LLM check to confirm the final evaluation is justified
@@ -804,7 +774,6 @@ func (e *Evaluator) getValidationPrompt(job *models.Job) string {
 	if job.FinalScore != nil {
 		finalScore = *job.FinalScore
 	}
-	shouldApply := job.ShouldSendEmail
 	finalReasons := job.FinalReasons
 	if len(finalReasons) == 0 && job.FinalReason != "" {
 		finalReasons = []string{job.FinalReason}
@@ -819,7 +788,6 @@ func (e *Evaluator) getValidationPrompt(job *models.Job) string {
 		"CV":             shortCV,
 		"JOB_DESCRIPTION": job.JobDescription,
 		"FINAL_SCORE":    fmt.Sprintf("%.1f", finalScore),
-		"SHOULD_APPLY":   strconv.FormatBool(shouldApply),
 		"FINAL_REASONS":  fmt.Sprintf("%q", finalReasons),
 	})
 }
@@ -834,4 +802,8 @@ func renderTemplate(template string, values map[string]string) string {
 
 func (e *Evaluator) GetLLMUsageTotals() TokenUsageTotals {
 	return e.openAIClient.GetUsageTotals()
+}
+
+func (e *Evaluator) ResetLLMUsageTotals() {
+	e.openAIClient.ResetUsageTotals()
 }

@@ -18,18 +18,19 @@ import (
 )
 
 type JobController struct {
-	config      *config.Config
-	scraper     *scraper.LinkedInScraper
-	filter      *filter.Filter
-	evaluator   *evaluator.Evaluator
-	cvReader    *cv.CVReader
-	notifier    *notification.EmailNotifier
-	storage     storage.JobStorage
-	checkpoint  storage.CheckpointStorage
-	jobTracker  storage.JobTrackerInterface
-	rateLimiter *utils.RateLimiter
-	logger      *utils.Logger
-	gcsStorage  *storage.GCSStorage // Optional GCS storage
+	config         *config.Config
+	scraper        *scraper.LinkedInScraper
+	filter         *filter.Filter
+	evaluator      *evaluator.Evaluator
+	cvReader       *cv.CVReader
+	notifier       *notification.EmailNotifier
+	storage        storage.JobStorage
+	checkpoint     storage.CheckpointStorage
+	runSummaryStore storage.RunSummaryStore
+	jobTracker     storage.JobTrackerInterface
+	rateLimiter    *utils.RateLimiter
+	logger         *utils.Logger
+	gcsStorage     *storage.GCSStorage // Optional GCS storage
 }
 
 func NewJobController(cfg *config.Config) (*JobController, error) {
@@ -70,6 +71,7 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 	// Create storage services (GCS or local)
 	var jobStorage storage.JobStorage
 	var checkpointService storage.CheckpointStorage
+	var runSummaryStore storage.RunSummaryStore
 	var jobTracker storage.JobTrackerInterface
 
 	if cfg.GCS.Enabled && gcsStorage != nil && gcsStorage.IsEnabled() {
@@ -81,6 +83,8 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 			return nil, fmt.Errorf("failed to create GCS checkpoint service: %w", err)
 		}
 		checkpointService = gcsCheckpointService
+
+		runSummaryStore = storage.NewGCSRunSummaryStore(gcsStorage)
 
 		gcsJobTracker, err := storage.NewGCSJobTracker(gcsStorage)
 		if err != nil {
@@ -99,6 +103,12 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 			return nil, fmt.Errorf("failed to create checkpoint service: %w", err)
 		}
 		checkpointService = localCheckpointService
+
+		localRunSummaryStore, err := storage.NewLocalRunSummaryStore(checkpointDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create run summary store: %w", err)
+		}
+		runSummaryStore = localRunSummaryStore
 
 		localJobTracker, err := storage.NewJobTracker(cfg.App.DataDir)
 		if err != nil {
@@ -136,28 +146,38 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 	}
 
 	controller := &JobController{
-		config:      cfg,
-		scraper:     linkedInScraper,
-		filter:      filterService,
-		evaluator:   evaluatorService,
-		cvReader:    cvReader,
-		notifier:    notifier,
-		storage:     jobStorage,
-		checkpoint:  checkpointService,
-		jobTracker:  jobTracker,
-		rateLimiter: tokenRateLimiter,
-		logger:      sharedLogger,
-		gcsStorage:  gcsStorage,
+		config:          cfg,
+		scraper:         linkedInScraper,
+		filter:          filterService,
+		evaluator:       evaluatorService,
+		cvReader:        cvReader,
+		notifier:        notifier,
+		storage:         jobStorage,
+		checkpoint:      checkpointService,
+		runSummaryStore: runSummaryStore,
+		jobTracker:      jobTracker,
+		rateLimiter:     tokenRateLimiter,
+		logger:          sharedLogger,
+		gcsStorage:      gcsStorage,
 	}
 
 	return controller, nil
 }
 
 func (jc *JobController) SearchAndFilterJobs() error {
-	jc.logger.Info("🎯 Starting Job Scorer Pipeline - %s", time.Now().Format("2006-01-02 15:04:05"))
+	return jc.SearchAndFilterJobsWithRunID("")
+}
+
+func (jc *JobController) SearchAndFilterJobsWithRunID(runID string) error {
+	startTime := time.Now()
+	jc.evaluator.ResetLLMUsageTotals()
+	jc.logger.Info("🎯 Starting Job Scorer Pipeline - %s", startTime.Format("2006-01-02 15:04:05"))
 
 	// Set a single run/session folder for all checkpoints in this run
-	runFolder := time.Now().Format("2006-01-02_15-04-05")
+	runFolder := runID
+	if runFolder == "" {
+		runFolder = startTime.Format("2006-01-02_15-04-05")
+	}
 	jc.checkpoint.SetRunFolder(runFolder)
 
 	metadata := map[string]interface{}{
@@ -165,12 +185,49 @@ func (jc *JobController) SearchAndFilterJobs() error {
 		"max_jobs":  jc.config.App.MaxJobs,
 	}
 
+	// Build run summary on exit (success or failure)
+	stageCounts := models.RunStageCounts{}
+	configSnapshot := models.RunConfigSnapshot{
+		Locations: jc.config.App.Locations,
+		MaxJobs:   jc.config.App.MaxJobs,
+	}
+	saveRunSummary := func(status models.RunStatus, errMsg string, notif *models.NotificationResult) {
+		completedAt := time.Now()
+		durationMs := completedAt.Sub(startTime).Milliseconds()
+		usage := jc.evaluator.GetLLMUsageTotals()
+		summary := &models.RunSummary{
+			RunID:       runFolder,
+			Status:      status,
+			StartedAt:   startTime,
+			CompletedAt: &completedAt,
+			DurationMs:  durationMs,
+			StageCounts: stageCounts,
+			Config:      configSnapshot,
+			LLMUsage: models.LLMUsageSnapshot{
+				Calls:                 usage.Calls,
+				InputTokens:           usage.InputTokens,
+				CachedInputTokens:     usage.CachedInputTokens,
+				NonCachedInputTokens:  usage.NonCachedInputTokens,
+				BillableInputTokens:   usage.BillableInputTokens,
+				OutputTokens:          usage.OutputTokens,
+				TotalTokens:           usage.TotalTokens,
+			},
+			Notification: notif,
+			ErrorMessage: errMsg,
+		}
+		if saveErr := jc.runSummaryStore.SaveRunSummary(summary); saveErr != nil {
+			jc.logger.Error("Failed to save run summary: %v", saveErr)
+		}
+	}
+
 	// STEP 1: FETCH JOBS
 	jc.logger.PipelineStart("JOB FETCHING", "Scraping LinkedIn for job postings from all configured locations")
 	allJobs, err := jc.fetchJobsFromAllLocations()
 	if err != nil {
+		saveRunSummary(models.RunStatusFailed, err.Error(), nil)
 		return fmt.Errorf("failed to fetch jobs: %w", err)
 	}
+	stageCounts.AllJobs = len(allJobs)
 	jc.logger.PipelineResult("FETCHING", 0, len(allJobs), "total jobs scraped")
 	jc.logJobSummary("All Fetched Jobs", allJobs)
 
@@ -184,8 +241,15 @@ func (jc *JobController) SearchAndFilterJobs() error {
 
 	// STEP 2: FILTER ALREADY PROCESSED
 	jc.logger.PipelineStart("DUPLICATE FILTERING", "Removing jobs that have already been processed")
-	newJobs := jc.jobTracker.FilterProcessedJobs(allJobs)
+	var newJobs []*models.Job
+	if jc.config.App.ForceReeval {
+		jc.logger.Info("ForceReeval is enabled — skipping duplicate filter, all %d jobs will be re-evaluated", len(allJobs))
+		newJobs = allJobs
+	} else {
+		newJobs = jc.jobTracker.FilterProcessedJobs(allJobs)
+	}
 	processedCount := len(allJobs) - len(newJobs)
+	stageCounts.DuplicatesRemoved = processedCount
 	jc.logger.PipelineResult("DUPLICATE FILTERING", len(allJobs), len(newJobs), fmt.Sprintf("(%d duplicates removed)", processedCount))
 
 	if processedCount > 0 {
@@ -196,6 +260,7 @@ func (jc *JobController) SearchAndFilterJobs() error {
 	jc.logger.PipelineStart("PREFILTERING", "Applying location, language and seniority filters")
 	prefilteredJobs := jc.filter.PrefilterJobs(newJobs)
 	filteredOutCount := len(newJobs) - len(prefilteredJobs)
+	prefilterExcludedJobs := buildPrefilterExcludedJobs(allJobs, newJobs, prefilteredJobs, jc.filter)
 	jc.logger.PipelineResult("PREFILTERING", len(newJobs), len(prefilteredJobs), fmt.Sprintf("(%d filtered out)", filteredOutCount))
 
 	// Log details of filtered out jobs
@@ -216,18 +281,22 @@ func (jc *JobController) SearchAndFilterJobs() error {
 		}
 	}
 
+	stageCounts.Prefiltered = len(prefilteredJobs)
 	if err := jc.checkpoint.SaveCheckpoint(prefilteredJobs, "prefiltered", metadata); err != nil {
 		jc.logger.Error("Failed to save prefiltered jobs checkpoint: %v", err)
 	}
+	jc.saveExcludedCheckpoint(prefilterExcludedJobs, "prefiltered", metadata)
 
 	// STEP 4: LLM INITIAL EVALUATION
 	jc.logger.PipelineStart("LLM INITIAL EVALUATION", "AI scoring of jobs for basic suitability")
 	evaluatedJobs, err := jc.evaluateJobsWithRateLimit(prefilteredJobs)
 	if err != nil {
+		saveRunSummary(models.RunStatusFailed, err.Error(), nil)
 		return fmt.Errorf("failed to evaluate jobs: %w", err)
 	}
 
-	successCount := jc.countSuccessfulEvaluations(evaluatedJobs)
+	stageCounts.Evaluated = jc.countSuccessfulEvaluations(evaluatedJobs)
+	successCount := stageCounts.Evaluated
 	jc.logger.PipelineResult("LLM EVALUATION", len(prefilteredJobs), successCount, "successfully scored")
 	jc.logEvaluationSummary("Initial Evaluation", evaluatedJobs)
 
@@ -237,7 +306,10 @@ func (jc *JobController) SearchAndFilterJobs() error {
 
 	// STEP 5: FILTER PROMISING JOBS
 	jc.logger.PipelineStart("PROMISING FILTER", "Selecting jobs with policy score threshold for detailed evaluation")
-	promisingJobs := jc.filter.FilterPromisingJobs(evaluatedJobs, jc.config.Policy.Pipeline.PromisingScoreThreshold)
+	promisingThreshold := jc.config.Policy.Pipeline.PromisingScoreThreshold
+	promisingJobs := jc.filter.FilterPromisingJobs(evaluatedJobs, promisingThreshold)
+	promisingExcludedJobs := buildPromisingExcludedJobs(evaluatedJobs, promisingJobs, jc.filter, promisingThreshold)
+	stageCounts.Promising = len(promisingJobs)
 	jc.logger.PipelineResult("PROMISING FILTER", len(evaluatedJobs), len(promisingJobs), "passed initial threshold")
 	jc.logJobSummary("Promising Jobs", promisingJobs)
 
@@ -247,15 +319,18 @@ func (jc *JobController) SearchAndFilterJobs() error {
 	if err := jc.checkpoint.SaveCheckpoint(promisingJobs, "promising", metadata); err != nil {
 		jc.logger.Error("Failed to save promising jobs checkpoint: %v", err)
 	}
+	jc.saveExcludedCheckpoint(promisingExcludedJobs, "promising", metadata)
 
 	// STEP 6: CV-BASED EVALUATION
 	jc.logger.PipelineStart("CV MATCHING", "Detailed AI evaluation with CV comparison")
 	finalEvaluatedJobs, err := jc.evaluateJobsWithCV(promisingJobs)
 	if err != nil {
+		saveRunSummary(models.RunStatusFailed, err.Error(), nil)
 		return fmt.Errorf("failed to perform CV evaluation: %w", err)
 	}
 
-	finalSuccessCount := jc.countSuccessfulFinalEvaluations(finalEvaluatedJobs)
+	stageCounts.FinalEvaluated = jc.countSuccessfulFinalEvaluations(finalEvaluatedJobs)
+	finalSuccessCount := stageCounts.FinalEvaluated
 	jc.logger.PipelineResult("CV MATCHING", len(promisingJobs), finalSuccessCount, "with final recommendations")
 	jc.logFinalEvaluationSummary("CV-Based Evaluation", finalEvaluatedJobs)
 
@@ -269,14 +344,18 @@ func (jc *JobController) SearchAndFilterJobs() error {
 	// STEP 7: NOTIFICATION FILTERING
 	jc.logger.PipelineStart("NOTIFICATION FILTER", "Selecting jobs that should trigger email alerts")
 	notificationJobs := jc.filter.FilterNotificationJobs(finalEvaluatedJobs)
+	notificationExcludedJobs := buildNotificationExcludedJobs(finalEvaluatedJobs, notificationJobs, jc.filter)
+	stageCounts.Notification = len(notificationJobs)
 	jc.logger.PipelineResult("NOTIFICATION FILTER", len(finalEvaluatedJobs), len(notificationJobs), "selected for notification")
 
 	if err := jc.checkpoint.SaveCheckpoint(notificationJobs, "notification", metadata); err != nil {
 		jc.logger.Error("Failed to save notification jobs checkpoint: %v", err)
 	}
+	jc.saveExcludedCheckpoint(notificationExcludedJobs, "notification", metadata)
 
 	// STEP 7.5: LLM VALIDATION (TWO-STAGE) - Optional
 	var validatedNotificationJobs []*models.Job
+	var validationExcludedJobs []*models.Job
 	if jc.config.Policy.Pipeline.EnableFinalValidation {
 		jc.logger.PipelineStart("LLM VALIDATION", "Validating notification jobs with second LLM pass")
 		var validationRejected int
@@ -287,6 +366,10 @@ func (jc *JobController) SearchAndFilterJobs() error {
 			if (jc.config.Policy.Pipeline.RejectEmptyDescriptions && desc == "") ||
 				(jc.config.Policy.Pipeline.RejectPlaceholderDescription && (desc == "job description not available" || desc == "not available")) {
 				validationRejected++
+				rejected := cloneJob(job)
+				rejected.Excluded = true
+				rejected.ExclusionReason = "Excluded by validation because the job description was missing or placeholder text"
+				validationExcludedJobs = append(validationExcludedJobs, rejected)
 				jc.logger.JobDetail("❌ Programmatic validation rejected: %s at %s (Reason: missing or placeholder job description)", job.Position, job.Company)
 				continue
 			}
@@ -294,6 +377,10 @@ func (jc *JobController) SearchAndFilterJobs() error {
 			valid, reason, err := jc.evaluator.ValidateFinalEvaluation(job)
 			if err != nil {
 				jc.logger.Warning("LLM validation failed for %s at %s: %v", job.Position, job.Company, err)
+				rejected := cloneJob(job)
+				rejected.Excluded = true
+				rejected.ExclusionReason = "Excluded because validation failed and no reliable approval could be established"
+				validationExcludedJobs = append(validationExcludedJobs, rejected)
 				continue
 			}
 
@@ -308,6 +395,10 @@ func (jc *JobController) SearchAndFilterJobs() error {
 			}
 			if flagged {
 				validationRejected++
+				rejected := cloneJob(job)
+				rejected.Excluded = true
+				rejected.ExclusionReason = "Excluded by validation because the validation reason contained a configured red-flag phrase"
+				validationExcludedJobs = append(validationExcludedJobs, rejected)
 				jc.logger.JobDetail("❌ Programmatic validation rejected: %s at %s (Reason: red-flag in LLM reason: %s)", job.Position, job.Company, reason)
 				continue
 			}
@@ -317,6 +408,10 @@ func (jc *JobController) SearchAndFilterJobs() error {
 				jc.logger.JobDetail("✅ LLM validation passed: %s at %s (Reason: %s)", job.Position, job.Company, reason)
 			} else {
 				validationRejected++
+				rejected := cloneJob(job)
+				rejected.Excluded = true
+				rejected.ExclusionReason = reason
+				validationExcludedJobs = append(validationExcludedJobs, rejected)
 				jc.logger.JobDetail("❌ LLM validation rejected: %s at %s (Reason: %s)", job.Position, job.Company, reason)
 			}
 		}
@@ -330,6 +425,12 @@ func (jc *JobController) SearchAndFilterJobs() error {
 		jc.logger.Info("LLM validation disabled - proceeding with all %d notification jobs", len(notificationJobs))
 	}
 
+	stageCounts.Validated = len(validatedNotificationJobs)
+	if err := jc.checkpoint.SaveCheckpoint(validatedNotificationJobs, "validated_notification", metadata); err != nil {
+		jc.logger.Error("Failed to save validated notification jobs checkpoint: %v", err)
+	}
+	jc.saveExcludedCheckpoint(validationExcludedJobs, "validated_notification", metadata)
+
 	// STEP 8: SEND NOTIFICATIONS
 	jc.logger.PipelineStart("EMAIL NOTIFICATION", "Sending email alerts for selected jobs")
 	if len(validatedNotificationJobs) > 0 {
@@ -338,11 +439,38 @@ func (jc *JobController) SearchAndFilterJobs() error {
 		}
 		if err := jc.notifier.SendJobNotification(validatedNotificationJobs); err != nil {
 			jc.logger.Error("Failed to send email notification: %v", err)
+			notifResult := &models.NotificationResult{
+				RunID:           runFolder,
+				JobIDs:          jobIDsFromJobs(validatedNotificationJobs),
+				RecipientsCount: len(jc.config.SMTP.ToRecipients),
+				SuccessCount:    0,
+				FailedCount:     len(jc.config.SMTP.ToRecipients),
+				CompletedAt:     time.Now().Format(time.RFC3339),
+				ErrorMessage:    err.Error(),
+			}
+			saveRunSummary(models.RunStatusFailed, err.Error(), notifResult)
 			return fmt.Errorf("failed to send email notification: %w", err)
 		}
+		stageCounts.EmailSent = len(validatedNotificationJobs)
+		if err := jc.checkpoint.SaveCheckpoint(validatedNotificationJobs, "email_sent", metadata); err != nil {
+			jc.logger.Error("Failed to save email sent jobs checkpoint: %v", err)
+		}
+		notifResult := &models.NotificationResult{
+			RunID:           runFolder,
+			JobIDs:          jobIDsFromJobs(validatedNotificationJobs),
+			RecipientsCount: len(jc.config.SMTP.ToRecipients),
+			SuccessCount:    len(jc.config.SMTP.ToRecipients),
+			FailedCount:     0,
+			CompletedAt:     time.Now().Format(time.RFC3339),
+		}
 		jc.logger.Success("Email notification sent for %d jobs", len(validatedNotificationJobs))
+		saveRunSummary(models.RunStatusSuccess, "", notifResult)
 	} else {
 		jc.logger.Skip("No jobs qualified for email notification after LLM validation")
+		if err := jc.checkpoint.SaveCheckpoint([]*models.Job{}, "email_sent", metadata); err != nil {
+			jc.logger.Error("Failed to save empty email sent jobs checkpoint: %v", err)
+		}
+		saveRunSummary(models.RunStatusSuccess, "", nil)
 	}
 
 	// Save daily snapshot
@@ -524,15 +652,10 @@ func (jc *JobController) evaluateJobsWithCV(jobs []*models.Job) ([]*models.Job, 
 		finalEvaluatedJobs = append(finalEvaluatedJobs, evaluatedJob)
 	}
 
-	// Count jobs that should be sent via email
-	emailJobsCount := 0
-	for _, job := range finalEvaluatedJobs {
-		if job.ShouldSendEmail {
-			emailJobsCount++
-		}
-	}
+	// Count jobs that meet notification score threshold
+	emailJobsCount := jc.countNotificationEligible(finalEvaluatedJobs)
 
-	jc.logger.Info("CV evaluation completed: %d jobs evaluated, %d marked for email notification",
+	jc.logger.Info("CV evaluation completed: %d jobs evaluated, %d eligible for email notification",
 		len(finalEvaluatedJobs), emailJobsCount)
 
 	return finalEvaluatedJobs, nil
@@ -669,24 +792,24 @@ func (jc *JobController) logFinalEvaluationSummary(title string, jobs []*models.
 		return
 	}
 
-	recommendedCount := 0
-	notRecommendedCount := 0
+	eligibleCount := 0
+	belowThresholdCount := 0
 	failedCount := 0
 
 	jc.logger.JobDetail("%s Results:", title)
 	for _, job := range jobs {
 		if job.FinalScore == nil {
 			failedCount++
-		} else if job.ShouldSendEmail {
-			recommendedCount++
-			jc.logger.JobDetail("  ✅ RECOMMENDED: %s at %s (Score: %.1f)", job.Position, job.Company, *job.FinalScore)
+		} else if *job.FinalScore >= jc.config.Policy.Notification.MinFinalScore {
+			eligibleCount++
+			jc.logger.JobDetail("  ✅ ELIGIBLE: %s at %s (Score: %.1f)", job.Position, job.Company, *job.FinalScore)
 		} else {
-			notRecommendedCount++
+			belowThresholdCount++
 		}
 	}
 
-	jc.logger.JobDetail("Summary: %d recommended, %d not recommended, %d failed",
-		recommendedCount, notRecommendedCount, failedCount)
+	jc.logger.JobDetail("Summary: %d eligible, %d below threshold, %d failed",
+		eligibleCount, belowThresholdCount, failedCount)
 }
 
 func (jc *JobController) countSuccessfulEvaluations(jobs []*models.Job) int {
@@ -707,4 +830,112 @@ func (jc *JobController) countSuccessfulFinalEvaluations(jobs []*models.Job) int
 		}
 	}
 	return count
+}
+
+func (jc *JobController) countNotificationEligible(jobs []*models.Job) int {
+	count := 0
+	threshold := jc.config.Policy.Notification.MinFinalScore
+	for _, job := range jobs {
+		if job.FinalScore != nil && *job.FinalScore >= threshold {
+			count++
+		}
+	}
+	return count
+}
+
+func jobIDsFromJobs(jobs []*models.Job) []string {
+	ids := make([]string, 0, len(jobs))
+	for _, j := range jobs {
+		if j.JobID != "" {
+			ids = append(ids, j.JobID)
+		}
+	}
+	return ids
+}
+
+// GetRunFolder returns the current/last run folder from the checkpoint service
+func (jc *JobController) GetRunFolder() string {
+	return jc.checkpoint.GetRunFolder()
+}
+
+// ListRuns returns recent run summaries for the API
+func (jc *JobController) ListRuns(limit int) ([]*models.RunSummary, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	return jc.runSummaryStore.ListRunSummaries(limit)
+}
+
+// GetRun returns a single run summary by ID
+func (jc *JobController) GetRun(runID string) (*models.RunSummary, error) {
+	return jc.runSummaryStore.LoadRunSummary(runID)
+}
+
+// GetRunStageJobs returns jobs for a specific stage of a run
+func (jc *JobController) GetRunStageJobs(runID, stage string) ([]*models.Job, error) {
+	return jc.checkpoint.LoadCheckpointByStage(runID, stage)
+}
+
+// GetAnalyticsOverview returns aggregated analytics across runs for the dashboard
+func (jc *JobController) GetAnalyticsOverview() (map[string]interface{}, error) {
+	summaries, err := jc.runSummaryStore.ListRunSummaries(100)
+	if err != nil {
+		return nil, err
+	}
+	totalRuns := len(summaries)
+	successCount := 0
+	failedCount := 0
+	var totalDurationMs int64
+	var totalAllJobs, totalPrefiltered, totalEvaluated, totalPromising, totalFinal, totalNotification, totalValidated, totalEmailSent int
+	var totalLLMCalls, totalInputTokens, totalOutputTokens int
+
+	for _, s := range summaries {
+		if s.Status == models.RunStatusSuccess {
+			successCount++
+		} else if s.Status == models.RunStatusFailed {
+			failedCount++
+		}
+		totalDurationMs += s.DurationMs
+		totalAllJobs += s.StageCounts.AllJobs
+		totalPrefiltered += s.StageCounts.Prefiltered
+		totalEvaluated += s.StageCounts.Evaluated
+		totalPromising += s.StageCounts.Promising
+		totalFinal += s.StageCounts.FinalEvaluated
+		totalNotification += s.StageCounts.Notification
+		totalValidated += s.StageCounts.Validated
+		totalEmailSent += s.StageCounts.EmailSent
+		totalLLMCalls += s.LLMUsage.Calls
+		totalInputTokens += s.LLMUsage.InputTokens
+		totalOutputTokens += s.LLMUsage.OutputTokens
+	}
+
+	avgDurationMs := int64(0)
+	if totalRuns > 0 {
+		avgDurationMs = totalDurationMs / int64(totalRuns)
+	}
+
+	return map[string]interface{}{
+		"runs": map[string]interface{}{
+			"total":   totalRuns,
+			"success": successCount,
+			"failed":  failedCount,
+			"avg_duration_ms": avgDurationMs,
+		},
+		"funnel": map[string]interface{}{
+			"all_jobs":        totalAllJobs,
+			"prefiltered":     totalPrefiltered,
+			"evaluated":       totalEvaluated,
+			"promising":       totalPromising,
+			"final_evaluated": totalFinal,
+			"notification":    totalNotification,
+			"validated":       totalValidated,
+			"email_sent":      totalEmailSent,
+		},
+		"llm_usage": map[string]interface{}{
+			"calls":          totalLLMCalls,
+			"input_tokens":   totalInputTokens,
+			"output_tokens":  totalOutputTokens,
+		},
+		"recent_runs": summaries,
+	}, nil
 }

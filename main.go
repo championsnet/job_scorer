@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -9,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"job-scorer/api"
 	"job-scorer/config"
 	"job-scorer/controller"
+	"job-scorer/multitenant"
 	"job-scorer/utils"
 )
 
@@ -47,10 +50,20 @@ func main() {
 
 	logger.Info("🚀 Starting Job Scorer application...")
 
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("APP_MODE")))
+	if mode == "web" || mode == "worker" || mode == "migrate" || mode == "import" {
+		logger.Info("Starting multi-tenant service mode: %s", mode)
+		if err := multitenant.Run(context.Background()); err != nil {
+			logger.Error("Multi-tenant mode failed: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Get port from environment variable (Cloud Run requirement)
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "8008"
 	}
 
 	// Load configuration
@@ -84,6 +97,7 @@ func main() {
 
 	// Setup HTTP endpoints
 	setupHTTPHandlers(cfg, jobController, logger)
+	setupAPIHandlers(jobController)
 
 	// Run jobs processing initially if RUN_ON_STARTUP is true
 	if cfg.App.RunOnStartup {
@@ -196,6 +210,28 @@ func setupHTTPHandlers(cfg *config.Config, jobController *controller.JobControll
     </div>
     <div class="endpoint">
         <span class="method">GET</span> <strong>/stats</strong> - View application statistics
+    </div>
+    <h2>📡 JSON API (for frontend):</h2>
+    <div class="endpoint">
+        <span class="method">POST</span> <strong>/api/runs</strong> - Trigger pipeline run (async)
+    </div>
+    <div class="endpoint">
+        <span class="method">GET</span> <strong>/api/runs/requests/{requestId}</strong> - Get run request status
+    </div>
+    <div class="endpoint">
+        <span class="method">GET</span> <strong>/api/runs</strong> - List recent runs
+    </div>
+    <div class="endpoint">
+        <span class="method">GET</span> <strong>/api/runs/{runId}</strong> - Get run details
+    </div>
+    <div class="endpoint">
+        <span class="method">GET</span> <strong>/api/runs/{runId}/stages/{stage}</strong> - Get jobs by stage
+    </div>
+    <div class="endpoint">
+        <span class="method">GET</span> <strong>/api/analytics/overview</strong> - Dashboard analytics
+    </div>
+    <div class="endpoint">
+        <span class="method">GET</span> <strong>/api/jobs/search?run_id=&amp;stage=</strong> - Search jobs
     </div>
     
     <h2>⏰ Scheduled Execution:</h2>
@@ -339,6 +375,19 @@ func setupHTTPHandlers(cfg *config.Config, jobController *controller.JobControll
 
 		w.Write([]byte(html))
 	})
+}
+
+func setupAPIHandlers(jobController *controller.JobController) {
+	h := api.NewHandlers(jobController)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/runs", h.PostRuns)
+	mux.HandleFunc("GET /api/runs/requests/{requestId}", h.GetRunRequest)
+	mux.HandleFunc("GET /api/runs", h.GetRuns)
+	mux.HandleFunc("GET /api/runs/{runId}", h.GetRun)
+	mux.HandleFunc("GET /api/runs/{runId}/stages/{stage}", h.GetRunStageJobs)
+	mux.HandleFunc("GET /api/analytics/overview", h.GetAnalyticsOverview)
+	mux.HandleFunc("GET /api/jobs/search", h.GetJobsSearch)
+	http.Handle("/api/", api.CORS(mux))
 }
 
 func validateConfig(cfg *config.Config) error {

@@ -2,6 +2,10 @@
 
 Job Scorer finds jobs from LinkedIn public listings, scores them with an LLM, matches them against your CV, and optionally emails you only the best matches.
 
+This repo now supports two runtime tracks:
+- **`APP_MODE=legacy`**: original single-user, file-backed mode.
+- **`APP_MODE=web|worker`**: multi-tenant SaaS mode (Firestore + Cloud Tasks + Firebase auth + account-scoped settings/CVs/runs/credits).
+
 ## 🚀 What it does
 
 - **Scrape**: query LinkedIn Jobs (public guest endpoints)
@@ -58,6 +62,27 @@ RUN_ON_STARTUP=true
 go build -o job-scorer .
 ./job-scorer
 ```
+
+## 🧱 Multi-tenant mode (new)
+
+Set `APP_MODE` and run one or two services:
+
+```bash
+# Web/API + SPA
+APP_MODE=web go run .
+
+# Worker (in another terminal)
+APP_MODE=worker go run .
+```
+
+Required env for multi-tenant mode:
+- Firebase config (`FIREBASE_PROJECT_ID`, optional `FIREBASE_CREDENTIALS_FILE`)
+- Cloud Tasks config for web mode (`CLOUD_TASKS_*`)
+- `WORKER_TOKEN`, `SCHEDULER_TOKEN`
+
+Development shortcut:
+- set `AUTH_BYPASS=true`
+- login from the frontend with a debug email (the client sends `Authorization: Bearer dev:<email>`)
 
 ## ⚙️ Configuration (the important bits)
 
@@ -116,10 +141,31 @@ Hot reload + helpers:
 ./dev.sh run
 ```
 
+### Frontend Dashboard
+
+A separate React dashboard is in `frontend/`. To run it:
+
+```bash
+# Terminal 1: start the Go backend
+go run .
+
+# Terminal 2: start the frontend (proxies /api to backend)
+cd frontend && npm run dev
+```
+
+Open http://localhost:5173 for the dashboard (runs, analytics, job explorer).
+
+The frontend now includes:
+- auth (Firebase or local debug-bypass)
+- account settings editor for policy JSON + schedule + notification emails
+- CV upload
+- billing/credits page
+
 Tests:
 
 ```bash
 go test ./...
+cd frontend && npm run test
 ```
 
 ## 📁 Outputs
@@ -150,6 +196,181 @@ These are ballpark estimates; actual cost varies with CV length, job description
 - Keep secrets in `.env` or your cloud secret manager; never commit real keys.
 - Don’t commit your CV PDF or generated outputs.
 - Ensure your usage complies with LinkedIn’s terms and local regulations.
+
+## ☁️ GCP scripts
+
+Two scripts are provided for the new deploy path:
+- `scripts/bootstrap_gcp.sh` (one-time infra/bootstrap)
+- `scripts/deploy_release.sh` (build, deploy worker+web, wire scheduler, smoke tests)
+
+Typical flow:
+
+```bash
+./scripts/bootstrap_gcp.sh
+./scripts/deploy_release.sh
+```
+
+The release script deploys:
+- **worker** (`APP_MODE=worker`) for Cloud Tasks execution
+- **web** (`APP_MODE=web`) for SPA + API + scheduler dispatch endpoint
+
+## ✅ Deploy from current state
+
+This is the exact sequence to deploy **from this repo state today**.
+
+### 0) Prerequisites
+
+- `gcloud` authenticated and project selected:
+
+```bash
+gcloud auth login
+gcloud config set project YOUR_PROJECT_ID
+```
+
+- Billing enabled on project.
+- A region chosen (defaults to `europe-west1` in scripts).
+
+### 1) Run one-time bootstrap
+
+```bash
+./scripts/bootstrap_gcp.sh
+```
+
+This creates:
+- Artifact Registry repo
+- Firestore database (native mode)
+- Cloud Storage bucket
+- Cloud Tasks queue
+- Service accounts
+- Base Secret Manager secrets
+
+### 2) Replace placeholder secrets
+
+Bootstrap seeds several secrets as `replace-me`. Update them before deploy:
+
+```bash
+printf "%s" "YOUR_OPENAI_KEY" | gcloud secrets versions add OPENAI_API_KEY --data-file=-
+printf "%s" "smtp.your-provider.com" | gcloud secrets versions add SMTP_HOST --data-file=-
+printf "%s" "587" | gcloud secrets versions add SMTP_PORT --data-file=-
+printf "%s" "YOUR_SMTP_USER" | gcloud secrets versions add SMTP_USER --data-file=-
+printf "%s" "YOUR_SMTP_PASS" | gcloud secrets versions add SMTP_PASS --data-file=-
+printf "%s" "no-reply@your-domain.com" | gcloud secrets versions add SMTP_FROM --data-file=-
+printf "%s" "YOUR_STRIPE_SECRET_KEY" | gcloud secrets versions add STRIPE_SECRET_KEY --data-file=-
+printf "%s" "YOUR_STRIPE_WEBHOOK_SECRET" | gcloud secrets versions add STRIPE_WEBHOOK_SECRET --data-file=-
+printf "%s" "YOUR_FIREBASE_PROJECT_ID" | gcloud secrets versions add FIREBASE_PROJECT_ID --data-file=-
+```
+
+### 3) Configure Firebase auth for production
+
+Enable Firebase Auth providers (Google and/or Email/Password) in Firebase Console, then export the frontend runtime config so it is injected at image build time:
+
+```bash
+export AUTH_BYPASS=false
+export VITE_FIREBASE_API_KEY="..."
+export VITE_FIREBASE_AUTH_DOMAIN="YOUR_PROJECT.firebaseapp.com"
+export VITE_FIREBASE_PROJECT_ID="YOUR_PROJECT"
+export VITE_FIREBASE_APP_ID="..."
+export VITE_FIREBASE_MESSAGING_SENDER_ID="..."
+# Optional (defaults to same-origin /api)
+export VITE_API_URL=""
+```
+
+Also add your Cloud Run web domain to Firebase Auth authorized domains after the first deploy URL is known.
+
+### 4) Deploy web + worker
+
+```bash
+./scripts/deploy_release.sh
+```
+
+Optional overrides:
+
+```bash
+export CLOUD_RUN_REGION=us-central1
+export SCHEDULER_CRON="0 */2 * * *"
+export SCHEDULER_TIMEZONE="Europe/Athens"
+./scripts/deploy_release.sh
+```
+
+### 5) Verify deployment
+
+From script output, copy `WEB_URL` and `WORKER_URL`:
+
+```bash
+curl -fsS "$WEB_URL/health"
+WORKER_HEALTH_TOKEN="$(gcloud auth print-identity-token)"
+curl -fsS "$WORKER_URL/health" -H "Authorization: Bearer ${WORKER_HEALTH_TOKEN}"
+```
+
+Open `WEB_URL` in browser.
+
+If `AUTH_BYPASS=false`:
+- Sign in using enabled Firebase provider(s).
+- Verify `/api/v1/me` succeeds after login (open app pages that call it).
+- Go to **Settings**:
+  - upload CV
+  - set cron / timezone
+  - set notification recipient emails
+  - save policy JSON
+- Go to **Billing** and add credits via Stripe (or seed credits manually in DB for testing).
+- Trigger a run from **Runs** page.
+
+### 6) Env/secret map actually used in Cloud Run
+
+**Env vars (non-secret):**
+- `APP_MODE` (`web` or `worker`)
+- `GCS_ENABLED` (`true`)
+- `GCS_BUCKET_NAME`
+- `GCS_PROJECT_ID`
+- `RUN_ON_STARTUP` (`false`)
+- `AUTH_BYPASS` (`true` or `false`)
+- `CLOUD_TASKS_PROJECT_ID` (web)
+- `CLOUD_TASKS_LOCATION` (web)
+- `CLOUD_TASKS_QUEUE` (web)
+- `CLOUD_TASKS_WORKER_URL` (web)
+- `CLOUD_TASKS_SERVICE_ACCOUNT` (web)
+
+**Secrets:**
+- `WORKER_TOKEN`
+- `SCHEDULER_TOKEN` (web)
+- `OPENAI_API_KEY`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USER`
+- `SMTP_PASS`
+- `SMTP_FROM`
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `FIREBASE_PROJECT_ID`
+
+### 6.5) Firestore composite indexes (required)
+
+If your project has no composite indexes yet, analytics and scheduler dispatch endpoints can return `500`.
+Create these once per project:
+
+```bash
+gcloud firestore indexes composite create \
+  --project "$GOOGLE_CLOUD_PROJECT" \
+  --collection-group="runs" \
+  --query-scope="COLLECTION" \
+  --field-config="field-path=account_id,order=ASCENDING" \
+  --field-config="field-path=created_at,order=DESCENDING"
+
+gcloud firestore indexes composite create \
+  --project "$GOOGLE_CLOUD_PROJECT" \
+  --collection-group="accounts" \
+  --query-scope="COLLECTION" \
+  --field-config="field-path=schedule_enabled,order=ASCENDING" \
+  --field-config="field-path=next_run_at,order=ASCENDING"
+```
+
+### 7) Daily ops commands
+
+```bash
+gcloud run services logs tail job-scorer-web --region="$CLOUD_RUN_REGION"
+gcloud run services logs tail job-scorer-worker --region="$CLOUD_RUN_REGION"
+gcloud scheduler jobs describe job-scorer-dispatch --location="$CLOUD_RUN_REGION"
+```
 
 ## 🤝 Contributing
 
