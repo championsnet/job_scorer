@@ -28,7 +28,12 @@ type LinkedInScraper struct {
 	userAgents []string
 	policy     config.ScraperPolicy
 	logger     *utils.Logger
+	onProgress func(total int)
 }
+
+// SetProgress registers a callback invoked with the running job count while
+// scraping, so the UI can show "Found N jobs so far…".
+func (s *LinkedInScraper) SetProgress(fn func(total int)) { s.onProgress = fn }
 
 type JobCache struct {
 	cache map[string]CacheItem
@@ -204,6 +209,9 @@ func (s *LinkedInScraper) Query(options QueryOptions) ([]*models.Job, error) {
 
 		allJobs = append(allJobs, jobs...)
 		s.logger.Info("Fetched %d jobs. Total: %d", len(jobs), len(allJobs))
+		if s.onProgress != nil {
+			s.onProgress(len(allJobs))
+		}
 
 		// Check if we should stop due to limit
 		if options.Limit > 0 && len(allJobs) >= options.Limit {

@@ -17,6 +17,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/stripe/stripe-go/v82 v82.5.1
 	github.com/unidoc/unipdf/v3 v3.69.0
+	github.com/webview/webview_go v0.0.0-20240831120633-6173450d4dd6
 	google.golang.org/api v0.247.0
 	gopkg.in/gomail.v2 v2.0.0-20160411212932-81ebce5c23df
 )

@@ -25,8 +25,26 @@ type Filter struct {
 
 func NewFilter(policy config.FilterPolicy, notificationPolicy config.NotificationPolicy, logger *utils.Logger) *Filter {
 	detectionLanguages := toLinguaLanguages(policy.DetectionLanguages)
-	if len(detectionLanguages) == 0 {
-		detectionLanguages = []lingua.Language{lingua.English, lingua.German, lingua.French}
+	// lingua requires at least two languages to build a detector. Pad with
+	// common fallbacks (without dropping the user's own languages) so any
+	// single-language config is safe. The detector is only consulted when
+	// LanguageFilterEnabled is true anyway.
+	if len(detectionLanguages) < 2 {
+		for _, fallback := range []lingua.Language{lingua.English, lingua.German, lingua.French} {
+			present := false
+			for _, existing := range detectionLanguages {
+				if existing == fallback {
+					present = true
+					break
+				}
+			}
+			if !present {
+				detectionLanguages = append(detectionLanguages, fallback)
+			}
+			if len(detectionLanguages) >= 2 {
+				break
+			}
+		}
 	}
 	primaryLanguage := parseLanguage(policy.PrimaryLanguage)
 	if primaryLanguage == lingua.Unknown {
@@ -99,6 +117,11 @@ func (f *Filter) isEnglishText(text string) bool {
 }
 
 func (f *Filter) languageRejectionReason(text string) string {
+	// Language filtering is opt-in. When disabled, never reject on language so
+	// the tool works for any candidate regardless of the local job language.
+	if !f.policy.LanguageFilterEnabled {
+		return ""
+	}
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}

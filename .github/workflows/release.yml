@@ -1,0 +1,103 @@
+name: Release apps
+
+# Build ready-to-run desktop apps (native window, no terminal/browser) for each
+# OS, plus headless server binaries for self-hosting. Triggered by a version tag:
+#   git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ---- macOS .app bundles (double-clickable, opens a native window) ----
+  macos-app:
+    strategy:
+      matrix:
+        include:
+          - { runner: macos-14, arch: apple-silicon }   # arm64
+          - { runner: macos-13, arch: intel }           # amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - name: Build Job Scorer.app
+        env: { CGO_ENABLED: "1", VERSION: "${{ github.ref_name }}" }
+        run: ./scripts/build_macos_app.sh dist
+      - name: Zip (preserving bundle metadata)
+        run: cd dist && ditto -c -k --keepParent "Job Scorer.app" "../job-scorer_${{ github.ref_name }}_macos-${{ matrix.arch }}.zip"
+      - uses: softprops/action-gh-release@v2
+        with: { files: "job-scorer_*_macos-*.zip" }
+
+  # ---- Windows app (native window, no console) ----
+  windows-app:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - name: Build
+        env: { CGO_ENABLED: "1" }
+        # -H windowsgui hides the console window so it looks like a real app.
+        run: go build -tags desktop -ldflags "-H windowsgui -s -w" -o "Job Scorer.exe" .
+      - name: Zip
+        run: Compress-Archive -Path "Job Scorer.exe" -DestinationPath "job-scorer_${{ github.ref_name }}_windows-x86_64.zip"
+      - uses: softprops/action-gh-release@v2
+        with: { files: "job-scorer_*_windows-*.zip" }
+
+  # ---- Linux app (native window via webkit2gtk) ----
+  linux-app:
+    runs-on: ubuntu-22.04   # ships webkit2gtk-4.0 that webview_go expects
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - name: Install webview deps
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+      - name: Build
+        env: { CGO_ENABLED: "1" }
+        run: go build -tags desktop -ldflags "-s -w" -o job-scorer .
+      - name: Package
+        run: |
+          echo "Needs libwebkit2gtk-4.0 at runtime: sudo apt install libwebkit2gtk-4.0-37" > RUNTIME_NOTE.txt
+          tar -czf "job-scorer_${{ github.ref_name }}_linux-x86_64.tar.gz" job-scorer RUNTIME_NOTE.txt
+      - uses: softprops/action-gh-release@v2
+        with: { files: "job-scorer_*_linux-*.tar.gz" }
+
+  # ---- Headless server binaries (no window; for self-hosting / servers) ----
+  server-binaries:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: darwin,  goarch: arm64, name: macos-apple-silicon }
+          - { goos: darwin,  goarch: amd64, name: macos-intel }
+          - { goos: linux,   goarch: amd64, name: linux-x86_64 }
+          - { goos: linux,   goarch: arm64, name: linux-arm64 }
+          - { goos: windows, goarch: amd64, name: windows-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - name: Build headless binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          BIN=job-scorer
+          [ "${{ matrix.goos }}" = "windows" ] && BIN=job-scorer.exe
+          go build -trimpath -ldflags "-s -w" -o "$BIN" .
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "job-scorer_${{ github.ref_name }}_server_${{ matrix.name }}.zip" job-scorer.exe
+          else
+            tar -czf "job-scorer_${{ github.ref_name }}_server_${{ matrix.name }}.tar.gz" job-scorer
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            job-scorer_*_server_*.tar.gz
+            job-scorer_*_server_*.zip

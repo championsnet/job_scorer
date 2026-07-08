@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Job Scorer — Dashboard</title>
+<style>
+  :root {
+    --bg:#0b1220; --panel:#131c31; --panel2:#0f1728; --line:#24304d; --text:#e7edf7;
+    --muted:#9fb0cd; --accent:#38bdf8; --accent2:#22d3ee; --good:#34d399; --warn:#fbbf24; --chip:#16233d;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:radial-gradient(1200px 600px at 20% -10%, #16233f 0%, var(--bg) 55%);
+         color:var(--text); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; padding:28px 16px 60px; }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  .top { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:24px; margin:0; }
+  .btn { background:var(--chip); border:1px solid var(--line); color:var(--text); border-radius:10px; padding:9px 14px; font-size:14px; cursor:pointer; text-decoration:none; display:inline-block; }
+  .btn:hover { border-color:var(--accent); }
+  .btn.primary { background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#04121e; font-weight:700; border:none; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .stats { display:flex; gap:10px; flex-wrap:wrap; margin:18px 0; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px 16px; min-width:110px; }
+  .stat .n { font-size:22px; font-weight:700; }
+  .stat .l { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.1em; }
+  .bar { display:flex; align-items:center; gap:10px; margin:14px 0; flex-wrap:wrap; }
+  select { background:var(--panel2); border:1px solid var(--line); color:var(--text); border-radius:9px; padding:8px 10px; font-size:14px; }
+  .tabs { display:flex; gap:6px; }
+  .tab { background:var(--panel2); border:1px solid var(--line); color:var(--muted); border-radius:9px; padding:8px 12px; font-size:13px; cursor:pointer; }
+  .tab.on { background:var(--chip); color:var(--text); border-color:var(--accent); }
+  .job { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin:10px 0; display:flex; gap:14px; }
+  .score { flex:0 0 auto; width:52px; height:52px; border-radius:12px; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:18px; }
+  .score.hi { background:rgba(52,211,153,.15); color:var(--good); border:1px solid rgba(52,211,153,.4); }
+  .score.mid { background:rgba(251,191,36,.12); color:var(--warn); border:1px solid rgba(251,191,36,.35); }
+  .score.lo { background:var(--panel2); color:var(--muted); border:1px solid var(--line); }
+  .job .body { flex:1; min-width:0; }
+  .job .title { font-weight:600; }
+  .job .meta { color:var(--muted); font-size:13px; margin:2px 0 6px; }
+  .job .reasons { font-size:13px; color:#c7d4ea; }
+  .job a.apply { color:var(--accent); font-size:13px; }
+  .empty { color:var(--muted); text-align:center; padding:40px; }
+  .msg { color:var(--muted); font-size:13px; }
+  .hidden { display: none !important; }
+  .spinner { width:18px; height:18px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; display:inline-block; vertical-align:middle; margin-right:10px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .progress { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; margin:14px 0; }
+  .steps { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .step { font-size:12px; padding:6px 10px; border-radius:999px; border:1px solid var(--line); color:var(--muted); background:var(--panel2); }
+  .step.done { color:var(--good); border-color:rgba(52,211,153,.4); }
+  .step.active { color:#04121e; background:linear-gradient(135deg,var(--accent),var(--accent2)); border:none; font-weight:600; }
+  .emptybox { text-align:center; padding:48px 24px; background:var(--panel); border:1px dashed var(--line); border-radius:16px; }
+  .emptybox .ico { font-size:42px; }
+  .emptybox h3 { margin:10px 0 0; }
+  .emptybox p { color:var(--muted); margin:8px auto 18px; max-width:380px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>🎯 Your jobs</h1>
+    <div>
+      <button class="btn primary" id="runBtn" onclick="runNow()">Run a scan now</button>
+      <a class="btn" href="/setup">Reconfigure</a>
+    </div>
+  </div>
+  <div id="runMsg" class="msg" style="margin-top:8px"></div>
+
+  <div id="progress" class="progress hidden">
+    <div><span class="spinner"></span><b id="pCur">Starting…</b></div>
+    <div class="steps" id="pSteps"></div>
+    <p class="msg" style="margin-top:10px">This usually takes a minute or two.</p>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="bar">
+    <label class="msg">Run:</label>
+    <select id="runSelect" onchange="loadJobs()"></select>
+    <div class="tabs">
+      <button class="tab on" data-stage="notification" onclick="setStage(this)">Recommended</button>
+      <button class="tab" data-stage="final_evaluated" onclick="setStage(this)">All scored (CV match)</button>
+      <button class="tab" data-stage="evaluated" onclick="setStage(this)">All evaluated</button>
+    </div>
+  </div>
+
+  <div id="jobs"></div>
+</div>
+
+<script>
+let stage = "notification";
+let runs = [];
+let isDesktop = false;
+
+async function j(url, opts) { const r = await fetch(url, opts); return r.json(); }
+
+// Open a job in the real browser (the native window can't open external links).
+function openJob(e) {
+  e.preventDefault();
+  const url = e.currentTarget.href;
+  if (isDesktop) fetch("/api/open?url=" + encodeURIComponent(url));
+  else window.open(url, "_blank", "noopener");
+  return false;
+}
+
+function scoreOf(job) {
+  const s = (stage === "evaluated") ? job.score : (job.finalScore ?? job.score);
+  return (s === null || s === undefined) ? null : s;
+}
+function scoreClass(s) { if (s === null) return "lo"; if (s >= 7) return "hi"; if (s >= 4) return "mid"; return "lo"; }
+
+async function loadRuns() {
+  const data = await j("/api/runs?limit=25");
+  runs = (data.runs || []).filter((r) => r.stage_counts);
+  const sel = document.getElementById("runSelect");
+  sel.innerHTML = "";
+  if (runs.length === 0) {
+    document.getElementById("jobs").innerHTML =
+      '<div class="emptybox"><div class="ico">🔍</div><h3>No scans yet</h3>' +
+      '<p>Run your first scan to pull jobs from LinkedIn and score them against your CV.</p>' +
+      '<button class="btn primary" onclick="runNow()">Run your first scan</button></div>';
+    document.getElementById("stats").innerHTML = "";
+    return;
+  }
+  runs.forEach((r, i) => {
+    const o = document.createElement("option");
+    const when = r.started_at ? new Date(r.started_at).toLocaleString() : r.run_id;
+    o.value = r.run_id; o.textContent = when + "  ·  " + (r.status || "");
+    sel.appendChild(o);
+  });
+  renderStats(runs[0]);
+  loadJobs();
+}
+
+function renderStats(run) {
+  const c = run.stage_counts || {};
+  const cells = [
+    ["Found", c.all_jobs || 0], ["Passed filters", c.prefiltered || 0],
+    ["Scored", c.final_evaluated || 0], ["Recommended", c.notification || 0],
+    ["Emailed", c.email_sent || 0],
+  ];
+  document.getElementById("stats").innerHTML = cells.map(
+    ([l, n]) => `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+}
+
+function setStage(el) {
+  document.querySelectorAll(".tab").forEach((t) => t.classList.remove("on"));
+  el.classList.add("on");
+  stage = el.dataset.stage;
+  loadJobs();
+}
+
+async function loadJobs() {
+  const runId = document.getElementById("runSelect").value;
+  if (!runId) return;
+  const run = runs.find((r) => r.run_id === runId);
+  if (run) renderStats(run);
+  const box = document.getElementById("jobs");
+  box.innerHTML = '<div class="empty">Loading…</div>';
+  const data = await j(`/api/runs/${encodeURIComponent(runId)}/stages/${stage}`);
+  let jobs = data.included_jobs || data.jobs || [];
+  jobs = jobs.slice().sort((a, b) => (scoreOf(b) ?? -1) - (scoreOf(a) ?? -1));
+  if (jobs.length === 0) { box.innerHTML = '<div class="empty">No jobs in this stage for this run.</div>'; return; }
+  box.innerHTML = jobs.map((job) => {
+    const s = scoreOf(job);
+    const reasons = (job.finalReasons && job.finalReasons.length ? job.finalReasons : job.reasons) || [];
+    return `<div class="job">
+      <div class="score ${scoreClass(s)}">${s === null ? "–" : s}</div>
+      <div class="body">
+        <div class="title">${esc(job.position || "Untitled")}</div>
+        <div class="meta">${esc(job.company || "")}${job.location ? " · " + esc(job.location) : ""}</div>
+        <div class="reasons">${reasons.slice(0, 2).map(esc).join(" · ")}</div>
+        ${job.jobUrl ? `<a class="apply" href="${esc(job.jobUrl)}" onclick="return openJob(event)">View / Apply →</a>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+const STEPS = [
+  "Searching LinkedIn for jobs…",
+  "Filtering by your criteria…",
+  "Scoring jobs with AI…",
+  "Matching jobs to your CV…",
+  "Selecting the best matches…",
+  "Double-checking the best matches…",
+  "Wrapping up…",
+];
+function renderProgress(stage, detail) {
+  document.getElementById("pCur").textContent = (stage || "Working…") + (detail ? "  ·  " + detail : "");
+  let idx = STEPS.indexOf(stage);
+  if (stage === "Done") idx = STEPS.length;
+  document.getElementById("pSteps").innerHTML = STEPS.map((s, i) => {
+    const cls = i < idx ? "done" : (i === idx ? "active" : "");
+    return `<span class="step ${cls}">${i < idx ? "✓ " : ""}${s.replace("…", "")}</span>`;
+  }).join("");
+}
+// pollActive tracks whatever run is currently in progress — manual, scheduled,
+// or the one right after setup — so the dashboard always shows a live scan and
+// refreshes results the moment it finishes (no manual reload needed).
+let wasActive = false;
+async function pollActive() {
+  let active;
+  try { active = (await j("/api/runs/active")).active; } catch { return; }
+  const btn = document.getElementById("runBtn");
+  const prog = document.getElementById("progress");
+  const msg = document.getElementById("runMsg");
+  if (active && active.status === "running") {
+    wasActive = true;
+    btn.disabled = true;
+    prog.classList.remove("hidden");
+    renderProgress(active.stage || "Starting…", active.detail || "");
+  } else {
+    // No run in progress — the progress box must never remain visible.
+    prog.classList.add("hidden");
+    btn.disabled = false;
+    if (wasActive) {
+      wasActive = false;
+      msg.textContent = active && active.status === "failed"
+        ? "Scan failed: " + (active.error || "unknown error")
+        : "✅ Scan complete.";
+      loadRuns();
+    }
+  }
+}
+async function runNow() {
+  document.getElementById("runMsg").textContent = "";
+  document.getElementById("progress").classList.remove("hidden");
+  document.getElementById("runBtn").disabled = true;
+  renderProgress("Starting…", "");
+  const res = await j("/api/runs", { method: "POST" });
+  if (res && res.status === "busy") document.getElementById("runMsg").textContent = "A scan is already running.";
+  pollActive();
+}
+
+j("/api/setup/status").then((s) => { isDesktop = !!(s && s.desktop); }).catch(() => {});
+loadRuns();
+pollActive();
+setInterval(pollActive, 4000);   // live progress + refresh when a run finishes
+setInterval(loadRuns, 30000);    // catch scheduled runs even if we miss the transition
+// The native webview pauses timers when the window is in the background, so a
+// scan that finishes while you're away would look frozen. Re-poll the moment
+// the window becomes visible/focused again.
+function refreshNow() { pollActive(); loadRuns(); }
+window.addEventListener("focus", refreshNow);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshNow(); });
+// Driven from the native side every 2s so progress stays live even when the OS
+// pauses the webview's own timers in the background.
+window.__poll = pollActive;
+</script>
+</body>
+</html>

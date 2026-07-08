@@ -13,14 +13,14 @@ import (
 
 // Valid pipeline stages for LoadCheckpointByStage
 var validStages = map[string]bool{
-	"all_jobs":            true,
-	"prefiltered":         true,
-	"evaluated":           true,
-	"promising":           true,
-	"final_evaluated":     true,
-	"notification":        true,
+	"all_jobs":               true,
+	"prefiltered":            true,
+	"evaluated":              true,
+	"promising":              true,
+	"final_evaluated":        true,
+	"notification":           true,
 	"validated_notification": true,
-	"email_sent":          true,
+	"email_sent":             true,
 }
 
 // Handlers holds dependencies for API handlers
@@ -36,6 +36,8 @@ type RunRequest struct {
 	RequestID   string `json:"request_id"`
 	RunID       string `json:"run_id"`
 	Status      string `json:"status"`
+	Stage       string `json:"stage,omitempty"`
+	Detail      string `json:"detail,omitempty"`
 	StartedAt   string `json:"started_at"`
 	CompletedAt string `json:"completed_at,omitempty"`
 	Error       string `json:"error,omitempty"`
@@ -72,10 +74,11 @@ func (h *Handlers) PostRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "POST /api/runs does not take a path parameter")
 		return
 	}
-	h.mu.Lock()
-	if h.activeRunID != "" {
+	req := h.StartTrackedRun("manual")
+	if req == nil {
+		h.mu.RLock()
 		active := h.requests[h.activeRunID]
-		h.mu.Unlock()
+		h.mu.RUnlock()
 		writeJSON(w, http.StatusConflict, map[string]interface{}{
 			"status":  "busy",
 			"message": "a run is already in progress",
@@ -83,20 +86,50 @@ func (h *Handlers) PostRuns(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"status":     "accepted",
+		"request_id": req.RequestID,
+		"run_id":     req.RunID,
+		"status_url": "/api/runs/requests/" + req.RequestID,
+		"message":    "pipeline run started",
+	})
+}
+
+// StartTrackedRun launches a scan tracked with live progress. It is the single
+// path for every kind of run (manual, scheduled, post-setup) so only one runs
+// at a time and the dashboard can always show what's happening. Returns nil if
+// a run is already in progress.
+func (h *Handlers) StartTrackedRun(trigger string) *RunRequest {
+	h.mu.Lock()
+	if h.activeRunID != "" {
+		h.mu.Unlock()
+		return nil
+	}
 	requestID := strconv.FormatInt(time.Now().UnixNano(), 10)
 	runID := time.Now().Format("2006-01-02_15-04-05")
 	req := &RunRequest{
 		RequestID: requestID,
 		RunID:     runID,
 		Status:    "running",
+		Stage:     "Starting…",
 		StartedAt: time.Now().Format(time.RFC3339),
 	}
 	h.requests[requestID] = req
 	h.activeRunID = requestID
 	h.mu.Unlock()
 
+	h.Controller.SetProgress(func(stage, detail string) {
+		h.mu.Lock()
+		if r := h.requests[requestID]; r != nil {
+			r.Stage = stage
+			r.Detail = detail
+		}
+		h.mu.Unlock()
+	})
+
 	go func(reqID, run string) {
 		err := h.Controller.SearchAndFilterJobsWithRunID(run)
+		h.Controller.SetProgress(nil)
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		stored := h.requests[reqID]
@@ -108,6 +141,7 @@ func (h *Handlers) PostRuns(w http.ResponseWriter, r *http.Request) {
 			stored.Error = err.Error()
 		} else {
 			stored.Status = "success"
+			stored.Stage = "Done"
 		}
 		stored.CompletedAt = time.Now().Format(time.RFC3339)
 		if h.activeRunID == reqID {
@@ -115,13 +149,19 @@ func (h *Handlers) PostRuns(w http.ResponseWriter, r *http.Request) {
 		}
 	}(requestID, runID)
 
-	writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"status":      "accepted",
-		"request_id":  requestID,
-		"run_id":      runID,
-		"status_url":  "/api/runs/requests/" + requestID,
-		"message":     "pipeline run started",
-	})
+	return req
+}
+
+// GetActiveRun returns the run currently in progress (or {"active": null}),
+// letting the dashboard show/refresh a running scan even across reloads.
+func (h *Handlers) GetActiveRun(w http.ResponseWriter, r *http.Request) {
+	h.mu.RLock()
+	var active *RunRequest
+	if h.activeRunID != "" {
+		active = h.requests[h.activeRunID]
+	}
+	h.mu.RUnlock()
+	writeJSON(w, http.StatusOK, map[string]interface{}{"active": active})
 }
 
 // GetRunRequest returns background run request status

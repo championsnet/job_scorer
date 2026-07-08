@@ -1,10 +1,10 @@
 # Job Scorer (Go)
 
-Job Scorer finds jobs from LinkedIn public listings, scores them with an LLM, matches them against your CV, and optionally emails you only the best matches.
+Job Scorer finds jobs from LinkedIn public listings, scores them with an LLM, matches them against your CV, and optionally emails you only the best matches. It works for **any** field, seniority, location, and language — you tell it what you want in a setup wizard; nothing is hardcoded.
 
-This repo now supports two runtime tracks:
-- **`APP_MODE=legacy`**: original single-user, file-backed mode.
-- **`APP_MODE=web|worker`**: multi-tenant SaaS mode (Firestore + Cloud Tasks + Firebase auth + account-scoped settings/CVs/runs/credits).
+**Two ways to run it:**
+- **Local / self-host (recommended for individuals):** download the app, open a browser, fill in a short setup wizard. No config files, no Go, no coding. This is what most people want — see the Quick start below.
+- **Multi-tenant SaaS mode** (`APP_MODE=web|worker`): Firestore + Cloud Tasks + Firebase auth + per-account settings/CVs/runs/credits. See [Multi-tenant mode](#-multi-tenant-mode-new).
 
 ## 🚀 What it does
 
@@ -14,54 +14,59 @@ This repo now supports two runtime tracks:
 - **Notify**: optional HTML email when jobs pass your thresholds
 - **Run anywhere**: local binary or Cloud Run + Cloud Scheduler
 
-## ✅ Quick start (local)
+## ✅ Quick start (local) — the setup wizard
 
-1. Install Go \(1.21+\).
+You need two things: an **OpenAI API key** ([get one here](https://platform.openai.com/api-keys)) and, optionally, an email account for alerts. Everything else is handled by the wizard.
 
-2. Create config files:
+### Option A — Download the app (no coding)
+
+1. Download your platform's app from the [Releases page](../../releases):
+   - **macOS:** `…_macos-apple-silicon.zip` (M1/M2/M3) or `…_macos-intel.zip`
+   - **Windows:** `…_windows-x86_64.zip`
+   - **Linux:** `…_linux-x86_64.tar.gz`
+2. Unzip and open it — **a Job Scorer window opens** (no browser, no terminal):
+   - **macOS:** double-click **Job Scorer.app**. The first time, right-click → **Open** (it's unsigned).
+   - **Windows:** double-click **Job Scorer.exe**.
+   - **Linux:** run `./job-scorer` (needs `libwebkit2gtk-4.0`).
+3. The **setup wizard** walks you through it, right in the window:
+   - Paste your OpenAI key (there's a **Test key** button).
+   - Pick where you want to work — search any city, or one-click a **Switzerland** metro area. No geoId hunting.
+   - Choose roles/fields, seniority, and the languages you speak (pick-lists, plus "type your own").
+   - Upload your CV (PDF, `.txt`, or `.md`).
+   - Optionally turn on email alerts (Gmail/Outlook/iCloud presets + a **Send test email** button).
+4. Click **Save & start**. It scores now, keeps checking on your schedule, and shows results in the **dashboard** inside the app. Reopen setup anytime from the **Reconfigure** button.
+
+Settings are saved in your user data folder (macOS: `~/Library/Application Support/JobScorer`).
+
+### Option B — Docker (one command)
 
 ```bash
-cp env.example .env
-cp config/config.example.json config/config.json
+docker compose up
 ```
 
-3. Edit `.env` \(secrets + runtime toggles\):
+Then open **http://localhost:8008** and complete the wizard. Everything is saved in `./jobscorer-data/`.
 
-```env
-OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL=gpt-4o-mini
-POLICY_CONFIG_PATH=config/config.json
+### Option C — Build from source (for developers)
 
-# Optional email
-SMTP_HOST=smtp.your-provider.com
-SMTP_PORT=587
-SMTP_SECURE=false
-SMTP_USER=your_email@domain.com
-SMTP_PASS=your_app_password
-SMTP_FROM=your_email@domain.com
-SMTP_TO=recipient@domain.com
+Native desktop app (macOS — opens a real window):
 
-RUN_ON_STARTUP=true
+```bash
+./scripts/build_macos_app.sh          # produces dist/Job Scorer.app
+open "dist/Job Scorer.app"
 ```
 
-4. Edit `config/config.json` \(your actual policy\):
-
-```json
-{
-  "app": {
-    "cronSchedule": "0 */1 * * *",
-    "jobLocations": ["10000000", "20000000"]
-  },
-  "cv": { "path": "your_cv.pdf" }
-}
-```
-
-5. Put your CV PDF at the configured path, then run:
+Or the headless / browser version (any OS, pure Go, no CGO — opens in your browser):
 
 ```bash
 go build -o job-scorer .
-./job-scorer
+./job-scorer                          # auto-opens http://localhost:8008
 ```
+
+Desktop builds use `-tags desktop` and need CGO + the OS webview (WebKit on macOS,
+WebView2 on Windows, webkit2gtk on Linux). The default `go build` is headless and
+cross-compiles trivially — it's what Docker and servers use.
+
+Advanced users can skip the wizard and edit `config/config.json` directly (copy `config/config.example.json`). Every prompt/threshold is configurable there.
 
 ## 🧱 Multi-tenant mode (new)
 

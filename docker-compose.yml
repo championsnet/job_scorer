@@ -1,0 +1,20 @@
+# Run Job Scorer locally with one command:
+#
+#   docker compose up
+#
+# Then open http://localhost:8008 and complete the setup wizard.
+# Your key, settings and CV are saved in ./jobscorer-data on your machine.
+services:
+  job-scorer:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    image: job-scorer:local
+    ports:
+      - "8008:8008"
+    environment:
+      - PORT=8008
+      - APP_HOME=/data
+    volumes:
+      - ./jobscorer-data:/data
+    restart: unless-stopped

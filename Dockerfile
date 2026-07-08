@@ -28,7 +28,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /bin/job-scorer .
+# -tags saas includes the multi-tenant stack (Firebase/Firestore/Cloud Tasks/
+# Stripe). The local/desktop builds omit it to stay small.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags saas -o /bin/job-scorer .
 
 FROM alpine:3.20
 WORKDIR /app
