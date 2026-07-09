@@ -210,8 +210,8 @@ CANDIDATE WANTS
 - Locations: {{TARGET_LOCATIONS}}
 - Speaks: {{LANGUAGES}}
 
-Score HIGH when the role's field and seniority match what the candidate wants.
-Score LOW when it is a different field, a much more senior role than wanted, or clearly requires a language the candidate does not speak.
+Score HIGH only when BOTH the field and the seniority match what the candidate wants.
+Score 0-2 when the seniority is out of range — an internship/working-student role, or a senior/lead/head/director/executive role when the candidate wants junior/mid — or a different field, or a language the candidate does not speak.
 
 Job: "{{POSITION}}" at {{COMPANY}} ({{LOCATION}})
 
@@ -244,7 +244,7 @@ CANDIDATE WANTS
 - Locations: {{TARGET_LOCATIONS}}
 - Speaks: {{LANGUAGES}}
 
-Score HIGH when the role's field and seniority match what the candidate wants; LOW for a different field, a much more senior role, or a required language the candidate does not speak.
+Score HIGH only when BOTH field and seniority match. Score 0-2 when the seniority is out of range (an internship/working-student role, or a senior/lead/head/director/executive role when the candidate wants junior/mid), a different field, or a language the candidate does not speak.
 
 {{JOBS}}
 Respond with JSON array:

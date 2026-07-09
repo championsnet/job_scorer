@@ -549,6 +549,9 @@ func (h *Handler) writeConfigJSON(p savePayload) error {
 
 	policy.CandidateProfile.DesiredFields = cleanList(p.DesiredFields)
 	policy.CandidateProfile.Seniority = cleanList(p.Seniority)
+	// Hard title filter for out-of-range seniority (internships / executive
+	// roles) so they're dropped before the AI ever scores them.
+	policy.Filters.UnwantedWordsInTitle = unwantedTitleWordsForSeniority(policy.CandidateProfile.Seniority)
 	langs := cleanList(p.Languages)
 	if len(langs) == 0 {
 		langs = []string{"English"}
@@ -721,6 +724,46 @@ func cleanList(items []string) []string {
 		}
 		seen[strings.ToLower(s)] = true
 		out = append(out, s)
+	}
+	return out
+}
+
+// unwantedTitleWordsForSeniority returns job-title keywords to reject based on
+// the seniority the candidate wants, so internships (too junior) and
+// director/executive roles (too senior) are filtered out before scoring.
+func unwantedTitleWordsForSeniority(selected []string) []string {
+	if len(selected) == 0 {
+		return []string{}
+	}
+	sel := map[string]bool{}
+	for _, s := range selected {
+		sel[strings.ToLower(strings.TrimSpace(s))] = true
+	}
+	tier := map[string]int{
+		"internship": 0, "intern": 0,
+		"entry level": 1, "entry": 1, "graduate": 1,
+		"junior": 2, "mid level": 3, "mid": 3, "intermediate": 3,
+		"senior": 4, "lead": 5, "principal": 5, "staff": 5, "manager": 5,
+		"director": 6, "head": 6, "executive": 7, "vp": 7, "c-level": 7,
+	}
+	maxTier := -1
+	for s := range sel {
+		if t, ok := tier[s]; ok && t > maxTier {
+			maxTier = t
+		}
+	}
+	var out []string
+	// Reject internships unless the candidate explicitly wants that level.
+	if !sel["internship"] && !sel["intern"] {
+		out = append(out, "internship", "praktikum", "praktikant", "werkstudent", "working student")
+	}
+	// Reject titles clearly more senior than the highest wanted level.
+	if maxTier >= 0 && maxTier < 4 { // wants at most mid-level
+		out = append(out, "senior ", "director", "head of", "chief ", "vice president", "president", "executive", "geschäftsführer", "managing director", "vp of")
+	} else if maxTier == 4 { // senior, but not lead+
+		out = append(out, "director", "head of", "chief ", "vice president", "executive", "vp of")
+	} else if maxTier == 5 {
+		out = append(out, "director", "chief ", "vice president", "vp of")
 	}
 	return out
 }
