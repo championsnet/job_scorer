@@ -11,9 +11,6 @@ import (
 	"job-scorer/utils"
 
 	"github.com/ledongthuc/pdf"
-	"github.com/unidoc/unipdf/v3/common/license"
-	"github.com/unidoc/unipdf/v3/extractor"
-	"github.com/unidoc/unipdf/v3/model"
 )
 
 type CVReader struct {
@@ -25,9 +22,7 @@ type CVReader struct {
 }
 
 func NewCVReader(cvPath string, policy config.CVPolicy) *CVReader {
-	if key := strings.TrimSpace(os.Getenv("UNIPDF_LICENSE_KEY")); key != "" {
-		_ = license.SetMeteredKey(key)
-	}
+	setUniPDFLicenseFromEnv()
 	return &CVReader{
 		cvPath: cvPath,
 		logger: utils.NewLogger("CVReader"),
@@ -74,6 +69,20 @@ func (c *CVReader) LoadCV() (string, error) {
 		}
 		c.logger.Debug("CV preview: %s", c.getPreview(c.cvText, 200))
 		return c.cvText, nil
+	}
+
+	// Prefer the OS-native PDF extractor when available (macOS PDFKit in the
+	// desktop app). It reads far more PDFs than the pure-Go parser.
+	if text, ok := nativePDFText(c.cvPath); ok {
+		cleaned := c.cleanText(text)
+		if c.isValidText(cleaned) {
+			c.cvText = cleaned
+			if c.policy.LogParserUsed {
+				c.logger.Info("CV loaded successfully using native (PDFKit) parser (%d chars)", len(c.cvText))
+			}
+			c.logger.Debug("CV preview: %s", c.getPreview(c.cvText, 200))
+			return c.cvText, nil
+		}
 	}
 
 	type extractionCandidate struct {
@@ -131,46 +140,6 @@ func (c *CVReader) LoadCV() (string, error) {
 	c.logger.Debug("CV preview: %s", c.getPreview(c.cvText, 200))
 
 	return c.cvText, nil
-}
-
-func (c *CVReader) extractTextWithUniPDF() (string, error) {
-	f, err := os.Open(c.cvPath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	pdfReader, err := model.NewPdfReader(f)
-	if err != nil {
-		return "", err
-	}
-	n, err := pdfReader.GetNumPages()
-	if err != nil {
-		return "", err
-	}
-	c.logger.Info("PDF has %d pages (unipdf)", n)
-
-	var textBuilder strings.Builder
-	for i := 1; i <= n; i++ {
-		page, err := pdfReader.GetPage(i)
-		if err != nil {
-			c.logger.Warning("Error getting page %d: %v", i, err)
-			continue
-		}
-		ex, err := extractor.New(page)
-		if err != nil {
-			c.logger.Warning("Error creating extractor for page %d: %v", i, err)
-			continue
-		}
-		text, err := ex.ExtractText()
-		if err != nil {
-			c.logger.Warning("Error extracting text from page %d: %v", i, err)
-			continue
-		}
-		textBuilder.WriteString(text)
-		textBuilder.WriteString("\n")
-	}
-	return textBuilder.String(), nil
 }
 
 func (c *CVReader) extractTextFromPDF() (string, error) {

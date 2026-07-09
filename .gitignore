@@ -68,3 +68,6 @@ job-scorer
 !frontend/package-lock.json
 !frontend/tsconfig.json
 !frontend/tsconfig.node.json
+
+# Build output
+dist/

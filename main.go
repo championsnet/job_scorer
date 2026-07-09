@@ -2,438 +2,395 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"job-scorer/api"
 	"job-scorer/config"
 	"job-scorer/controller"
-	"job-scorer/multitenant"
+	"job-scorer/setup"
 	"job-scorer/utils"
+
+	"github.com/robfig/cron/v3"
 )
 
-// checkStartupFlag checks if the application has already run recently (within 30 minutes)
+// checkStartupFlag reports whether an initial run happened within the last 30
+// minutes, so restarts don't re-scrape immediately.
 func checkStartupFlag(dataDir string) bool {
 	flagFile := filepath.Join(dataDir, "startup_flag.txt")
-
-	// Check if flag file exists and was created recently
 	if info, err := os.Stat(flagFile); err == nil {
-		// Allow rerun if more than 30 minutes have passed
-		timeSinceLastRun := time.Since(info.ModTime())
-		return timeSinceLastRun < 30*time.Minute
+		return time.Since(info.ModTime()) < 30*time.Minute
 	}
-
 	return false
 }
 
-// createStartupFlag creates a flag file to mark that startup processing has run
 func createStartupFlag(dataDir string) error {
 	flagFile := filepath.Join(dataDir, "startup_flag.txt")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return err
+	}
+	content := fmt.Sprintf("Startup processing completed at %s\n", time.Now().Format(time.RFC3339))
+	return os.WriteFile(flagFile, []byte(content), 0o644)
+}
 
-	// Ensure directory exists
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+// App holds the live, hot-swappable configuration and controller for local
+// (single-user) mode. The setup wizard can rebuild it after the user saves
+// their settings, without restarting the process.
+type App struct {
+	mu         sync.RWMutex
+	logger     *utils.Logger
+	cfg        *config.Config
+	ctrl       *controller.JobController
+	handlers   *api.Handlers
+	apiHandler http.Handler
+	scheduler  *cron.Cron
+}
+
+// triggerRun starts a scan through the single tracked path (so only one runs at
+// a time and the dashboard can show progress). Used by the scheduler and setup.
+func (a *App) triggerRun(trigger string) {
+	a.mu.RLock()
+	h := a.handlers
+	a.mu.RUnlock()
+	if h == nil {
+		return
+	}
+	if req := h.StartTrackedRun(trigger); req == nil {
+		a.logger.Info("Skipping %s run — a scan is already in progress", trigger)
+	} else {
+		a.logger.Info("Started %s run %s", trigger, req.RunID)
+	}
+}
+
+func (a *App) configured() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.ctrl != nil
+}
+
+func (a *App) snapshot() (*config.Config, *controller.JobController, http.Handler) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg, a.ctrl, a.apiHandler
+}
+
+// reload loads configuration from disk and rebuilds the controller. It is
+// called at startup and again whenever the wizard saves new settings.
+func (a *App) reload() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if err := validateConfig(cfg); err != nil {
+		return err
+	}
+	ctrl, err := controller.NewJobController(cfg)
+	if err != nil {
 		return err
 	}
 
-	// Create flag file with current timestamp
-	content := fmt.Sprintf("Startup processing completed at %s\n", time.Now().Format(time.RFC3339))
-	return os.WriteFile(flagFile, []byte(content), 0644)
+	handlers := api.NewHandlers(ctrl)
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("POST /api/runs", handlers.PostRuns)
+	apiMux.HandleFunc("GET /api/runs/requests/{requestId}", handlers.GetRunRequest)
+	apiMux.HandleFunc("GET /api/runs/active", handlers.GetActiveRun)
+	apiMux.HandleFunc("GET /api/runs", handlers.GetRuns)
+	apiMux.HandleFunc("GET /api/runs/{runId}", handlers.GetRun)
+	apiMux.HandleFunc("GET /api/runs/{runId}/stages/{stage}", handlers.GetRunStageJobs)
+	apiMux.HandleFunc("GET /api/analytics/overview", handlers.GetAnalyticsOverview)
+	apiMux.HandleFunc("GET /api/jobs/search", handlers.GetJobsSearch)
+
+	a.mu.Lock()
+	a.cfg = cfg
+	a.ctrl = ctrl
+	a.handlers = handlers
+	a.apiHandler = api.CORS(apiMux)
+	a.mu.Unlock()
+
+	printApplicationStatus(cfg, ctrl, a.logger)
+	a.startBackgroundWork()
+	return nil
+}
+
+// startBackgroundWork (re)builds the recurring scheduler for the current cron
+// expression. It does NOT auto-run on every launch — recurring runs come from
+// the scheduler and one-off runs from the dashboard or right after setup — so
+// opening the app never silently kicks off a scrape. Safe to call repeatedly.
+func (a *App) startBackgroundWork() {
+	cfg, ctrl, _ := a.snapshot()
+	if cfg == nil || ctrl == nil {
+		return
+	}
+
+	if a.scheduler != nil {
+		a.scheduler.Stop()
+		a.scheduler = nil
+	}
+	expr := strings.TrimSpace(cfg.App.CronSchedule)
+	if expr == "" || strings.EqualFold(expr, "manual") {
+		a.logger.Info("Automatic scanning is OFF — scans run only when you click Run.")
+		return
+	}
+	sched := cron.New()
+	if _, err := sched.AddFunc(expr, func() {
+		a.triggerRun("scheduled")
+	}); err != nil {
+		a.logger.Warning("Could not start scheduler for cron %q: %v (runs can still be triggered from the dashboard)", expr, err)
+	} else {
+		sched.Start()
+		a.scheduler = sched
+		a.logger.Info("⏰ Scheduler active: %s", expr)
+	}
 }
 
 func main() {
 	logger := utils.NewLogger("Main")
-
 	logger.Info("🚀 Starting Job Scorer application...")
 
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("APP_MODE")))
 	if mode == "web" || mode == "worker" || mode == "migrate" || mode == "import" {
 		logger.Info("Starting multi-tenant service mode: %s", mode)
-		if err := multitenant.Run(context.Background()); err != nil {
+		if err := runSaaS(context.Background()); err != nil {
 			logger.Error("Multi-tenant mode failed: %v", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	// Get port from environment variable (Cloud Run requirement)
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8008"
-	}
-
-	// Load configuration
-	cfg, err := config.Load()
-	if err != nil {
-		logger.Error("Failed to load configuration: %v", err)
-		// Start a basic HTTP server even if config fails
-		startBasicServer(port, logger)
-		return
-	}
-
-	// Validate configuration
-	if err := validateConfig(cfg); err != nil {
-		logger.Error("Configuration validation failed: %v", err)
-		// Start a basic HTTP server even if validation fails
-		startBasicServer(port, logger)
-		return
-	}
-
-	// Create job controller
-	jobController, err := controller.NewJobController(cfg)
-	if err != nil {
-		logger.Error("Failed to create job controller: %v", err)
-		// Start a basic HTTP server even if controller creation fails
-		startBasicServer(port, logger)
-		return
-	}
-
-	// Print application status
-	printApplicationStatus(cfg, jobController, logger)
-
-	// Setup HTTP endpoints
-	setupHTTPHandlers(cfg, jobController, logger)
-	setupAPIHandlers(jobController)
-
-	// Run jobs processing initially if RUN_ON_STARTUP is true
-	if cfg.App.RunOnStartup {
-		// Check if we're in development mode by looking for Air or development indicators
-		isDevMode := os.Getenv("AIR_MAIN_BINARY") != "" || os.Getenv("DEV_MODE") == "true"
-
-		// Check if we've already run startup processing recently (within 30 minutes)
-		hasRunRecently := checkStartupFlag(cfg.App.DataDir)
-
-		if hasRunRecently {
-			logger.Info("Skipping initial job processing (already ran within 30 minutes)")
+		if guiEnabled {
+			// Desktop app: ephemeral port so every launch is a fresh origin —
+			// no clashing with a lingering old process and no stale webview cache.
+			port = "0"
 		} else {
-			logger.Info("Running initial job processing (RUN_ON_STARTUP=true)")
-			go func() {
-				time.Sleep(5 * time.Second) // Give server time to start
-				if err := jobController.SearchAndFilterJobs(); err != nil {
-					logger.Error("Failed to process jobs: %v", err)
-				} else {
-					// Mark that we've run startup processing
-					if err := createStartupFlag(cfg.App.DataDir); err != nil {
-						logger.Warning("Failed to create startup flag: %v", err)
-					}
-				}
-			}()
+			port = "8008"
 		}
+	}
 
-		// In dev mode, run the job on a schedule (internal cron) since Cloud Scheduler isn't available
-		if isDevMode {
-			intervalMinutes := 60
-			if v := os.Getenv("DEV_CRON_INTERVAL_MINUTES"); v != "" {
-				if n, err := strconv.Atoi(v); err == nil {
-					intervalMinutes = n
-				}
-			}
-			if intervalMinutes > 0 {
-				interval := time.Duration(intervalMinutes) * time.Minute
-				logger.Info("⏰ Dev cron enabled: running job every %s", interval)
-				go func() {
-					ticker := time.NewTicker(interval)
-					defer ticker.Stop()
-					for range ticker.C {
-						logger.Info("🔄 Dev cron: running job processing")
-						if err := jobController.SearchAndFilterJobs(); err != nil {
-							logger.Error("Dev cron failed: %v", err)
-						}
-					}
-				}()
-			}
+	// Where writable state (.env, config/, data/) lives. APP_HOME (used by
+	// Docker) wins; otherwise the desktop app uses a per-user data dir (Finder
+	// launches apps with cwd="/"), and the plain binary uses the working dir.
+	home := strings.TrimSpace(os.Getenv("APP_HOME"))
+	if home == "" {
+		home = guiDefaultHome()
+	}
+	if home != "" {
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			logger.Warning("Could not create data dir %s: %v", home, err)
+		} else if err := os.Chdir(home); err != nil {
+			logger.Warning("Could not switch to data dir %s: %v", home, err)
 		}
-	} else {
-		logger.Info("Skipping initial job processing (RUN_ON_STARTUP=false)")
 	}
 
-	logger.Info("Starting HTTP server on port %s", port)
-	logger.Info("🔗 Health check: http://localhost:%s/health", port)
-	logger.Info("🔗 Manual run: http://localhost:%s/run", port)
-	logger.Info("🔗 Stats: http://localhost:%s/stats", port)
-	logger.Info("💡 For scheduled runs, use Google Cloud Scheduler to call the /run endpoint")
-	logger.Info("   Example cron expression: %s", cfg.App.CronSchedule)
-
-	// Start HTTP server (blocking)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		logger.Error("Failed to start HTTP server: %v", err)
-		os.Exit(1)
+	baseDir, err := os.Getwd()
+	if err != nil {
+		baseDir = "."
 	}
-}
 
-func startBasicServer(port string, logger *utils.Logger) {
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Job Scorer is running (configuration error - check logs)"))
-	})
+	app := &App{logger: logger}
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
+	wizard := setup.New(logger, baseDir)
+	wizard.OnSaved = app.reload
+	wizard.IsConfigured = app.configured
+	wizard.Desktop = guiEnabled
+	wizard.OnRunNow = func() { app.triggerRun("setup") }
 
-	logger.Info("Starting basic HTTP server on port %s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		logger.Error("Failed to start HTTP server: %v", err)
-		os.Exit(1)
-	}
-}
+	mux := http.NewServeMux()
+	wizard.RegisterRoutes(mux)
 
-func setupHTTPHandlers(cfg *config.Config, jobController *controller.JobController, logger *utils.Logger) {
-	// Root endpoint
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		html := `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Job Scorer</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .endpoint { background: #f5f5f5; padding: 10px; margin: 10px 0; border-radius: 5px; }
-        .method { background: #007acc; color: white; padding: 2px 8px; border-radius: 3px; font-size: 12px; }
-    </style>
-</head>
-<body>
-    <h1>🎯 Job Scorer API</h1>
-    <p>Job scoring and notification service is running!</p>
-    
-    <h2>📊 Available Endpoints:</h2>
-    <div class="endpoint">
-        <span class="method">GET</span> <strong>/health</strong> - Health check
-    </div>
-    <div class="endpoint">
-        <span class="method">POST</span> <strong>/run</strong> - Trigger job processing manually
-    </div>
-    <div class="endpoint">
-        <span class="method">GET</span> <strong>/stats</strong> - View application statistics
-    </div>
-    <h2>📡 JSON API (for frontend):</h2>
-    <div class="endpoint">
-        <span class="method">POST</span> <strong>/api/runs</strong> - Trigger pipeline run (async)
-    </div>
-    <div class="endpoint">
-        <span class="method">GET</span> <strong>/api/runs/requests/{requestId}</strong> - Get run request status
-    </div>
-    <div class="endpoint">
-        <span class="method">GET</span> <strong>/api/runs</strong> - List recent runs
-    </div>
-    <div class="endpoint">
-        <span class="method">GET</span> <strong>/api/runs/{runId}</strong> - Get run details
-    </div>
-    <div class="endpoint">
-        <span class="method">GET</span> <strong>/api/runs/{runId}/stages/{stage}</strong> - Get jobs by stage
-    </div>
-    <div class="endpoint">
-        <span class="method">GET</span> <strong>/api/analytics/overview</strong> - Dashboard analytics
-    </div>
-    <div class="endpoint">
-        <span class="method">GET</span> <strong>/api/jobs/search?run_id=&amp;stage=</strong> - Search jobs
-    </div>
-    
-    <h2>⏰ Scheduled Execution:</h2>
-    <p>This service is designed to be triggered by Google Cloud Scheduler.</p>
-    <p>Configure your scheduler to call: <code>POST /run</code></p>
-    <p>Recommended schedule: <code>` + cfg.App.CronSchedule + `</code></p>
-    
-    <h2>🔧 Configuration:</h2>
-    <ul>
-        <li>Locations: ` + strings.Join(cfg.App.Locations, ", ") + `</li>
-        <li>Cron Schedule: ` + cfg.App.CronSchedule + `</li>
-        <li>Run on Startup: ` + fmt.Sprintf("%t", cfg.App.RunOnStartup) + `</li>
-    </ul>
-</body>
-</html>`
-		w.Write([]byte(html))
-	})
-
-	// Health check endpoint
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok","service":"job-scorer"}`))
 	})
+	mux.HandleFunc("/", app.handleRoot(wizard))
+	mux.HandleFunc("/run", app.handleRun)
+	mux.HandleFunc("/stats", app.handleStats)
+	mux.HandleFunc("GET /api/open", app.handleOpenExternal)
+	mux.Handle("/api/", http.HandlerFunc(app.handleAPI))
 
-	// Job processing endpoint (triggered by Cloud Scheduler)
-	http.HandleFunc("/run", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost && r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+	// Try to load an existing configuration. If it fails, we stay in setup
+	// mode and the wizard is served at "/".
+	if err := app.reload(); err != nil {
+		logger.Warning("Not configured yet: %v", err)
+		logger.Info("👉 Open the setup wizard to get started: http://localhost:%s/setup", port)
+	} else {
+		logger.Info("🔗 Dashboard:   http://localhost:%s/", port)
+		logger.Info("🔗 Reconfigure: http://localhost:%s/setup", port)
+	}
 
-		logger.Info("🔄 Received request to run job processing (triggered via HTTP)")
+	// Desktop app binds localhost only (private); headless/Docker binds all
+	// interfaces so a container port mapping can reach it.
+	bindAddr := ":" + port
+	if guiEnabled {
+		bindAddr = "127.0.0.1:" + port
+	}
+	ln, err := net.Listen("tcp", bindAddr)
+	if err != nil {
+		logger.Error("Failed to bind %s: %v", bindAddr, err)
+		os.Exit(1)
+	}
+	actualPort := ln.Addr().(*net.TCPAddr).Port
+	url := fmt.Sprintf("http://localhost:%d", actualPort)
+	logger.Info("Serving on %s", url)
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- http.Serve(ln, mux) }()
 
-		start := time.Now()
-		if err := jobController.SearchAndFilterJobs(); err != nil {
-			logger.Error("Failed to process jobs: %v", err)
-			http.Error(w, fmt.Sprintf("Failed to process jobs: %v", err), http.StatusInternalServerError)
-			return
-		}
+	if guiEnabled {
+		// Desktop build: show the app in a native window and exit when closed.
+		waitReady(url)
+		logger.Info("Opening the app window…")
+		// Cache-bust so the webview never shows a previous build's page.
+		runGUI(url+"/?v="+strconv.FormatInt(time.Now().UnixNano(), 10), "Job Scorer")
+		return
+	}
 
-		duration := time.Since(start)
-		message := fmt.Sprintf("✅ Job processing completed successfully in %v", duration)
-		logger.Info("%s", message)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(fmt.Sprintf(`{"status":"success","message":"%s","duration":"%v"}`, message, duration)))
-	})
-
-	// Statistics endpoint
-	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
-		stats := jobController.GetStats()
-
-		w.Header().Set("Content-Type", "text/html")
-		html := `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Job Scorer Stats</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .stat-section { background: #f9f9f9; padding: 15px; margin: 10px 0; border-radius: 5px; }
-        .stat-item { margin: 5px 0; }
-        .badge { background: #28a745; color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
-        .badge.false { background: #dc3545; }
-    </style>
-</head>
-<body>
-    <h1>📊 Job Scorer Statistics</h1>
-    <div class="stat-section">
-        <h3>🔧 Configuration</h3>`
-
-		if configStats, ok := stats["config"].(map[string]interface{}); ok {
-			html += fmt.Sprintf(`
-        <div class="stat-item">Locations: %v</div>
-        <div class="stat-item">Cron Schedule: %v</div>
-        <div class="stat-item">LLM API: <span class="badge %v">%v</span></div>
-        <div class="stat-item">SMTP: <span class="badge %v">%v</span></div>
-        <div class="stat-item">CV Loaded: <span class="badge %v">%v</span></div>`,
-				configStats["locations"],
-				configStats["cron_schedule"],
-				configStats["llm_configured"], configStats["llm_configured"],
-				configStats["smtp_configured"], configStats["smtp_configured"],
-				configStats["cv_loaded"], configStats["cv_loaded"])
-		}
-
-		html += `
-    </div>
-    <div class="stat-section">
-        <h3>🧮 LLM Usage</h3>`
-
-		if llmUsage, ok := stats["llm_usage"].(map[string]interface{}); ok {
-			html += fmt.Sprintf(`
-        <div class="stat-item">Calls: %v</div>
-        <div class="stat-item">Input Tokens: %v</div>
-        <div class="stat-item">Non-cached Input Tokens: %v</div>
-        <div class="stat-item">Cached Input Tokens: %v</div>
-        <div class="stat-item">Billable Input Tokens: %v</div>
-        <div class="stat-item">Output Tokens: %v</div>
-        <div class="stat-item">Total Tokens: %v</div>`,
-				llmUsage["calls"],
-				llmUsage["input_tokens"],
-				llmUsage["non_cached_input_tokens"],
-				llmUsage["cached_input_tokens"],
-				llmUsage["billable_input_tokens"],
-				llmUsage["output_tokens"],
-				llmUsage["total_tokens"])
-		}
-
-		html += `
-    </div>
-    <div class="stat-section">
-        <h3>🎯 Job Tracking</h3>`
-
-		if jobStats, ok := stats["job_tracker"].(map[string]interface{}); ok {
-			html += fmt.Sprintf(`
-        <div class="stat-item">Total Processed Jobs: %v</div>
-        <div class="stat-item">Recent Jobs (7 days): %v</div>`,
-				jobStats["total_processed_jobs"],
-				jobStats["recent_jobs_7_days"])
-		}
-
-		html += `
-    </div>
-    <div class="stat-section">
-        <h3>⚡ Rate Limiter</h3>`
-
-		if rateLimiterStats, ok := stats["rate_limiter"].(map[string]interface{}); ok {
-			html += fmt.Sprintf(`
-        <div class="stat-item">Active Requests: %v / %v</div>
-        <div class="stat-item">Tokens Used: %v / %v</div>`,
-				rateLimiterStats["active_requests"], rateLimiterStats["max_requests"],
-				rateLimiterStats["tokens_used"], rateLimiterStats["token_limit"])
-		}
-
-		html += `
-    </div>
-    <p><a href="/">← Back to Home</a></p>
-</body>
-</html>`
-
-		w.Write([]byte(html))
-	})
+	// Plain binary: open the default browser automatically unless disabled
+	// (NO_BROWSER=true, set in Docker). Then block on the server.
+	if noBrowser, _ := strconv.ParseBool(os.Getenv("NO_BROWSER")); !noBrowser {
+		go func() {
+			waitReady(url)
+			if err := openBrowser(url); err != nil {
+				logger.Info("Open %s in your browser to continue.", url)
+			}
+		}()
+	}
+	if err := <-serverErr; err != nil {
+		logger.Error("Failed to start HTTP server: %v", err)
+		os.Exit(1)
+	}
 }
 
-func setupAPIHandlers(jobController *controller.JobController) {
-	h := api.NewHandlers(jobController)
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/runs", h.PostRuns)
-	mux.HandleFunc("GET /api/runs/requests/{requestId}", h.GetRunRequest)
-	mux.HandleFunc("GET /api/runs", h.GetRuns)
-	mux.HandleFunc("GET /api/runs/{runId}", h.GetRun)
-	mux.HandleFunc("GET /api/runs/{runId}/stages/{stage}", h.GetRunStageJobs)
-	mux.HandleFunc("GET /api/analytics/overview", h.GetAnalyticsOverview)
-	mux.HandleFunc("GET /api/jobs/search", h.GetJobsSearch)
-	http.Handle("/api/", api.CORS(mux))
+// waitReady blocks until the local server answers /health (or times out).
+func waitReady(url string) {
+	client := &http.Client{Timeout: time.Second}
+	for i := 0; i < 100; i++ {
+		if resp, err := client.Get(url + "/health"); err == nil {
+			resp.Body.Close()
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+func openBrowser(url string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url).Start()
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	default:
+		return exec.Command("xdg-open", url).Start()
+	}
+}
+
+func (a *App) handleRoot(wizard *setup.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		if !a.configured() {
+			wizard.ServeIndex(w, r)
+			return
+		}
+		wizard.ServeDashboard(w, r)
+	}
+}
+
+func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
+	_, ctrl, _ := a.snapshot()
+	if ctrl == nil {
+		http.Error(w, "Not configured yet — open /setup first.", http.StatusServiceUnavailable)
+		return
+	}
+	a.logger.Info("🔄 Manual run triggered via HTTP")
+	start := time.Now()
+	if err := ctrl.SearchAndFilterJobs(); err != nil {
+		a.logger.Error("Run failed: %v", err)
+		http.Error(w, fmt.Sprintf("Run failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(fmt.Sprintf(`{"status":"success","duration":"%v"}`, time.Since(start))))
+}
+
+func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
+	_, ctrl, _ := a.snapshot()
+	if ctrl == nil {
+		http.Error(w, "Not configured yet — open /setup first.", http.StatusServiceUnavailable)
+		return
+	}
+	stats := ctrl.GetStats()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{"stats": stats}); err != nil {
+		a.logger.Warning("Failed to encode stats: %v", err)
+	}
+}
+
+// handleOpenExternal opens a job URL in the user's real browser — needed in the
+// desktop app, where the embedded webview can't open target="_blank" links.
+func (a *App) handleOpenExternal(w http.ResponseWriter, r *http.Request) {
+	u := strings.TrimSpace(r.URL.Query().Get("url"))
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		http.Error(w, "invalid url", http.StatusBadRequest)
+		return
+	}
+	if err := openBrowser(u); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"ok":true}`))
+}
+
+func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
+	_, _, apiHandler := a.snapshot()
+	if apiHandler == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"not configured — complete setup at /setup"}`))
+		return
+	}
+	apiHandler.ServeHTTP(w, r)
 }
 
 func validateConfig(cfg *config.Config) error {
 	if cfg.OpenAI.APIKey == "" {
-		return fmt.Errorf("OPENAI_API_KEY is required (or GROQ_API_KEY for backward compatibility)")
+		return fmt.Errorf("OPENAI_API_KEY is required")
 	}
-
 	if len(cfg.App.Locations) == 0 {
 		return fmt.Errorf("at least one job location must be configured")
 	}
-
 	if cfg.App.CVPath == "" {
-		return fmt.Errorf("CV_PATH is required")
+		return fmt.Errorf("a CV file is required")
 	}
-
-	// Check if CV file exists
 	if _, err := os.Stat(cfg.App.CVPath); os.IsNotExist(err) {
 		return fmt.Errorf("CV file not found at path: %s", cfg.App.CVPath)
 	}
-
 	return nil
 }
 
 func printApplicationStatus(cfg *config.Config, jobController *controller.JobController, logger *utils.Logger) {
-	logger.Info("📋 Application Configuration:")
-	logger.Info("   📍 Job Locations: %v", cfg.App.Locations)
-	logger.Info("   ⏰ Cron Schedule: %s (for Google Cloud Scheduler)", cfg.App.CronSchedule)
-	logger.Info("   🏃 Run on Startup: %t", cfg.App.RunOnStartup)
-	logger.Info("   📄 CV Path: %s", cfg.App.CVPath)
-	logger.Info("   💾 Output Directory: %s", cfg.App.OutputDir)
-	logger.Info("   🤖 LLM Model: %s", cfg.OpenAI.Model)
-	logger.Info("   🚦 Rate Limit: %d requests per minute", cfg.RateLimit.MaxRequests)
-
+	logger.Info("📋 Configuration:")
+	logger.Info("   📍 Locations: %v", cfg.App.Locations)
+	logger.Info("   ⏰ Schedule: %s", cfg.App.CronSchedule)
+	logger.Info("   📄 CV: %s", cfg.App.CVPath)
+	logger.Info("   🤖 Model: %s", cfg.OpenAI.Model)
 	if cfg.SMTP.Host != "" {
-		recipients := strings.Join(cfg.SMTP.ToRecipients, ", ")
-		logger.Info("   📧 Email Notifications: Enabled (%s → %s)", cfg.SMTP.From, recipients)
+		logger.Info("   📧 Email: enabled (%s → %s)", cfg.SMTP.From, strings.Join(cfg.SMTP.ToRecipients, ", "))
 	} else {
-		logger.Warning("   📧 Email Notifications: Disabled (SMTP not configured)")
-	}
-
-	// Print stats
-	stats := jobController.GetStats()
-	if configStats, ok := stats["config"].(map[string]interface{}); ok {
-		logger.Info("📊 Service Status:")
-		logger.Info("   ✅ LLM API: %t", configStats["llm_configured"])
-		logger.Info("   ✅ SMTP: %t", configStats["smtp_configured"])
-		logger.Info("   ✅ CV Loaded: %t", configStats["cv_loaded"])
+		logger.Info("   📧 Email: disabled")
 	}
 }

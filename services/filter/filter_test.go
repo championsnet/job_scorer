@@ -12,6 +12,7 @@ func testPolicies() (config.FilterPolicy, config.NotificationPolicy) {
 	return config.FilterPolicy{
 		UnwantedLocations: []string{"EMEA", "DACH", "Switzerland (Remote)", "Europe", "EU"},
 		UnwantedWordsInTitle: []string{"Head", "Senior", "Director", "Sr."},
+		LanguageFilterEnabled: true,
 		PrimaryLanguage:    "english",
 		DetectionLanguages: []string{"english", "german", "french"},
 		RedFlagLanguageKeywords: []string{
@@ -34,6 +35,25 @@ func testPolicies() (config.FilterPolicy, config.NotificationPolicy) {
 		MinTextLengthForLanguageDetect: 8,
 	}, config.NotificationPolicy{
 		MinFinalScore: 7.0,
+	}
+}
+
+// A single detection language (the universal default when language filtering is
+// off) must not panic lingua, which requires >= 2 languages to build.
+func TestNewFilterSingleDetectionLanguageDoesNotPanic(t *testing.T) {
+	policy := config.FilterPolicy{
+		LanguageFilterEnabled: false,
+		PrimaryLanguage:       "english",
+		DetectionLanguages:    []string{"english"},
+	}
+	f := NewFilter(policy, config.NotificationPolicy{}, nil)
+	if f == nil {
+		t.Fatal("expected a filter, got nil")
+	}
+	// With language filtering off, a non-English title must still pass.
+	job := &models.Job{Position: "Entwickler", Company: "Corp", Location: "Zurich"}
+	if reason := f.PrefilterReason(job); reason != "" {
+		t.Fatalf("expected no rejection when language filter disabled, got %q", reason)
 	}
 }
 

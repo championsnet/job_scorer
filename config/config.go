@@ -94,7 +94,7 @@ func Load() (*Config, error) {
 	config := &Config{
 		OpenAI: OpenAIConfig{
 			APIKey:  getEnv("OPENAI_API_KEY", getEnv("GROQ_API_KEY", "")),
-			Model:   getEnv("OPENAI_MODEL", getEnv("GROQ_MODEL", "gpt-5.2")),
+			Model:   getEnv("OPENAI_MODEL", getEnv("GROQ_MODEL", "gpt-5.4-nano")),
 			BaseURL: getEnv("OPENAI_BASE_URL", "https://api.openai.com/v1/chat/completions"),
 		},
 		SMTP: SMTPConfig{
@@ -113,13 +113,13 @@ func Load() (*Config, error) {
 			CVPath:                cvPath,
 			DataDir:               getEnv("DATA_DIR", "data"),
 			OutputDir:             getEnv("OUTPUT_DIR", "."),
-			MaxJobs:               getEnvInt("MAX_JOBS_PER_LOCATION", 1000),
+			MaxJobs:               getEnvInt("MAX_JOBS_PER_LOCATION", 50),
 			EnableFinalValidation: policy.Pipeline.EnableFinalValidation,
 		},
 		RateLimit: RateLimitConfig{
-			MaxRequests:        getEnvInt("MAX_REQUESTS_PER_MINUTE", 20),
+			MaxRequests:        getEnvInt("MAX_REQUESTS_PER_MINUTE", 60),
 			TimeWindow:         time.Minute,
-			MaxTokensPerMinute: getEnvInt("MAX_TOKENS_PER_MINUTE", 10000),
+			MaxTokensPerMinute: getEnvInt("MAX_TOKENS_PER_MINUTE", 90000),
 		},
 		GCS: GCSConfig{
 			BucketName:  getEnv("GCS_BUCKET_NAME", ""),

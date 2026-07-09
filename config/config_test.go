@@ -52,7 +52,7 @@ func TestLoad(t *testing.T) {
 			want: &Config{
 				OpenAI: OpenAIConfig{
 					APIKey:  "",
-					Model:   "gpt-5.2",
+					Model:   "gpt-5.4-nano",
 					BaseURL: "https://api.openai.com/v1/chat/completions",
 				},
 				SMTP: SMTPConfig{
@@ -73,7 +73,7 @@ func TestLoad(t *testing.T) {
 					OutputDir:    ".",
 				},
 				RateLimit: RateLimitConfig{
-					MaxRequests: 20,
+					MaxRequests: 60,
 					TimeWindow:  time.Minute,
 				},
 			},

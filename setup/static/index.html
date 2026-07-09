@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Job Scorer — Setup</title>
+<style>
+  :root {
+    --bg: #0b1220; --panel: #131c31; --panel2: #0f1728; --line: #24304d;
+    --text: #e7edf7; --muted: #9fb0cd; --accent: #38bdf8; --accent2: #22d3ee;
+    --good: #34d399; --bad: #fb7185; --chip: #16233d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: radial-gradient(1200px 600px at 20% -10%, #16233f 0%, var(--bg) 55%);
+    color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 32px 16px 140px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 22px; margin: 16px 0; }
+  .card h2 { font-size: 17px; margin: 0 0 2px; display: flex; align-items: center; gap: 10px; }
+  .num { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 50%;
+         background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #04121e; font-weight: 700; font-size: 14px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 2px 0 16px 36px; }
+  label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 14px 0 6px; }
+  input[type=text], input[type=password], input[type=email], input[type=number], select {
+    width: 100%; background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 10px; padding: 11px 12px; font-size: 15px; outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 160px; }
+  .btn { background: var(--chip); border: 1px solid var(--line); color: var(--text); border-radius: 10px;
+         padding: 10px 14px; font-size: 14px; cursor: pointer; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.small { padding: 8px 12px; font-size: 13px; }
+  .btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #04121e; font-weight: 700; border: none; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; background: var(--chip); border: 1px solid var(--line);
+          padding: 6px 10px; border-radius: 999px; font-size: 13px; }
+  .chip button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; }
+  .chip button:hover { color: var(--bad); }
+  .checklist { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .opt { background: var(--panel2); border: 1px solid var(--line); color: var(--muted); border-radius: 999px;
+         padding: 7px 12px; font-size: 13px; cursor: pointer; }
+  .opt:hover { border-color: var(--accent); }
+  .opt.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #04121e; border: none; font-weight: 600; }
+  .status { font-size: 13px; margin-top: 8px; min-height: 18px; }
+  .ok { color: var(--good); } .err { color: var(--bad); }
+  .results { border: 1px solid var(--line); border-radius: 10px; margin-top: 6px; overflow: hidden; background: var(--panel2); }
+  .results div { padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--line); }
+  .results div:last-child { border-bottom: none; }
+  .results div:hover { background: var(--chip); }
+  .toggle { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .toggle input { width: auto; }
+  .savebar { position: fixed; left: 0; right: 0; bottom: 0; background: rgba(11,18,32,.92); backdrop-filter: blur(8px);
+             border-top: 1px solid var(--line); padding: 14px 16px; }
+  .savebar .inner { max-width: 760px; margin: 0 auto; display: flex; align-items: center; gap: 14px; justify-content: space-between; }
+  .savebar .msg { font-size: 13px; color: var(--muted); }
+  a { color: var(--accent); }
+  .pill { font-size: 11px; background: var(--chip); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; color: var(--muted); }
+  .hidden { display: none; }
+  .success { text-align: center; padding: 40px 20px; }
+  .success .big { font-size: 46px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a id="backLink" href="/" class="btn hidden" style="display:inline-block; margin-bottom:16px;">← Cancel &amp; back to dashboard</a>
+  <h1>🎯 Job Scorer setup</h1>
+  <p class="sub">A few questions and you're done. You'll need an OpenAI API key; email is optional.</p>
+
+  <div id="form">
+    <!-- 1. OpenAI -->
+    <div class="card">
+      <h2><span class="num">1</span> OpenAI key</h2>
+      <p class="hint">The tool uses OpenAI to score jobs. Get a key at
+        <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">platform.openai.com/api-keys</a>.
+        It stays on your computer.</p>
+      <label>API key</label>
+      <input id="openaiKey" type="password" placeholder="sk-..." autocomplete="off" />
+      <div class="row" style="margin-top:12px">
+        <div>
+          <label>Model</label>
+          <select id="modelSelect" onchange="onModelChange()">
+            <option value="gpt-5.4-nano">gpt-5.4-nano — cheapest, recommended</option>
+            <option value="gpt-5.4-mini">gpt-5.4-mini</option>
+            <option value="gpt-5.4">gpt-5.4 — best quality</option>
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
+            <option value="__custom__">Type your own…</option>
+          </select>
+          <input id="modelCustom" type="text" class="hidden" placeholder="exact model name" style="margin-top:8px" />
+        </div>
+        <div style="flex:0; min-width:auto; display:flex; align-items:flex-end">
+          <button class="btn small" onclick="testOpenAI()">Test key</button>
+        </div>
+      </div>
+      <p class="hint" style="margin-left:0; margin-top:8px">Reasoning is automatically turned off for reasoning models (o-series / GPT-5) to keep scoring fast and cheap.</p>
+      <div id="openaiStatus" class="status"></div>
+    </div>
+
+    <!-- 2. Locations -->
+    <div class="card">
+      <h2><span class="num">2</span> Where do you want to work?</h2>
+      <p class="hint">Type a city or region and pick it from the list — or use the Switzerland quick-add below. Add as many as you like.</p>
+      <label>Quick add — Switzerland 🇨🇭</label>
+      <div id="swissQuick" class="chips"></div>
+      <label style="margin-top:16px">Search any city / region</label>
+      <input id="locSearch" type="text" placeholder="e.g. Zurich, London, Berlin..." oninput="onLocSearch()" autocomplete="off" />
+      <div id="locResults" class="results hidden"></div>
+      <div id="locChips" class="chips"></div>
+    </div>
+
+    <!-- 3. Profile -->
+    <div class="card">
+      <h2><span class="num">3</span> What are you looking for?</h2>
+      <p class="hint">Add the fields/roles you want, your target seniority, and the languages you speak. Press Enter to add each one.</p>
+      <label>Roles / fields</label>
+      <input id="fieldsInput" type="text" placeholder="e.g. Marketing, Software Engineering, Finance — Enter after each" />
+      <div id="fieldsChips" class="chips"></div>
+
+      <label>Seniority — tap to select</label>
+      <div id="senChecklist" class="checklist"></div>
+      <input id="senCustom" type="text" placeholder="Add another level and press Enter" style="margin-top:8px" />
+
+      <label>Languages you speak — tap to select</label>
+      <div id="langChecklist" class="checklist"></div>
+      <input id="langCustom" type="text" placeholder="Add another language and press Enter" style="margin-top:8px" />
+
+      <div class="toggle">
+        <input id="onlyMyLang" type="checkbox" />
+        <label for="onlyMyLang" style="margin:0; text-transform:none; letter-spacing:normal; font-size:14px; color:var(--text)">
+          Only show jobs written in my language(s)
+        </label>
+      </div>
+    </div>
+
+    <!-- 4. CV -->
+    <div class="card">
+      <h2><span class="num">4</span> Your CV</h2>
+      <p class="hint">Choose a PDF, .txt, or .md CV. It's matched against each job.</p>
+      <input id="cvFile" type="file" accept=".pdf,.txt,.md,.markdown" onchange="uploadCV()" />
+      <button id="cvPickBtn" class="btn small hidden" onclick="pickCV()">Choose CV file…</button>
+      <div id="cvStatus" class="status"></div>
+    </div>
+
+    <!-- 5. Email -->
+    <div class="card">
+      <h2><span class="num">5</span> Email alerts <span class="pill">optional</span></h2>
+      <p class="hint">Get an email when good jobs are found. Skip this if you'd rather just check the dashboard.</p>
+      <div class="toggle" style="margin-top:0">
+        <input id="emailOn" type="checkbox" onchange="toggleEmail()" />
+        <label for="emailOn" style="margin:0; text-transform:none; letter-spacing:normal; font-size:14px; color:var(--text)">
+          Send me email alerts
+        </label>
+      </div>
+      <div id="emailFields" class="hidden">
+        <label>Email provider</label>
+        <select id="emailProvider" onchange="applyProvider()">
+          <option value="gmail">Gmail</option>
+          <option value="outlook">Outlook / Hotmail</option>
+          <option value="icloud">iCloud</option>
+          <option value="yahoo">Yahoo</option>
+          <option value="custom">Other (custom SMTP)</option>
+        </select>
+        <p id="appPwHint" class="hint" style="margin-left:0"></p>
+        <div class="row">
+          <div><label>Your email address</label><input id="emailUser" type="email" placeholder="you@gmail.com" /></div>
+          <div><label>App password</label><input id="emailPass" type="password" placeholder="app password" autocomplete="off" /></div>
+        </div>
+        <div id="customSmtp" class="row hidden">
+          <div><label>SMTP host</label><input id="emailHost" type="text" placeholder="smtp.example.com" /></div>
+          <div><label>Port</label><input id="emailPort" type="number" value="587" /></div>
+        </div>
+        <label>Send alerts to</label>
+        <input id="emailToInput" type="text" placeholder="Recipient email — Enter after each" />
+        <div id="emailToChips" class="chips"></div>
+        <button class="btn small" style="margin-top:12px" onclick="testEmail()">Send test email</button>
+        <div id="emailStatus" class="status"></div>
+      </div>
+    </div>
+
+    <!-- 6. Schedule -->
+    <div class="card">
+      <h2><span class="num">6</span> How often to check</h2>
+      <div class="row">
+        <div>
+          <label>Check for new jobs</label>
+          <select id="schedule">
+            <option value="manual">Only when I click Run (no automatic scans)</option>
+            <option value="0 9 * * *">Once a day (9am)</option>
+            <option value="0 */4 * * *">Every 4 hours</option>
+            <option value="0 */2 * * *">Every 2 hours</option>
+            <option value="0 */1 * * *">Every hour</option>
+          </select>
+        </div>
+        <div>
+          <label>Only jobs posted within</label>
+          <select id="datePosted">
+            <option value="past hour">Past hour</option>
+            <option value="past day" selected>Past day</option>
+            <option value="past week">Past week</option>
+            <option value="past month">Past month</option>
+          </select>
+        </div>
+        <div>
+          <label>Job type</label>
+          <select id="jobType">
+            <option value="">Any</option>
+            <option value="full-time">Full-time only</option>
+            <option value="part-time">Part-time only</option>
+            <option value="contract">Contract</option>
+            <option value="internship">Internship</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div>
+          <label>Jobs to check per scan</label>
+          <input id="maxJobs" type="number" value="50" min="5" max="500" />
+          <p class="hint" style="margin-left:0">Fewer = faster &amp; cheaper. 50 is a good start.</p>
+        </div>
+        <div>
+          <label>Only recommend matches scoring at least</label>
+          <input id="minScore" type="number" value="7" min="0" max="10" step="0.5" />
+          <p class="hint" style="margin-left:0">Out of 10. Higher = only the strongest matches get emailed.</p>
+        </div>
+      </div>
+      <div class="toggle">
+        <input id="runOnStartup" type="checkbox" />
+        <label for="runOnStartup" style="margin:0; text-transform:none; letter-spacing:normal; font-size:14px; color:var(--text)">
+          Run one scan right after saving (otherwise nothing runs until you click Run)
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <div id="success" class="card success hidden">
+    <div class="big">🎉</div>
+    <h2 style="justify-content:center">You're all set!</h2>
+    <p class="sub" id="successMsg">Job Scorer is configured and running.</p>
+    <div class="row" style="justify-content:center">
+      <a class="btn primary" href="/">Open dashboard</a>
+    </div>
+  </div>
+</div>
+
+<div class="savebar" id="savebar">
+  <div class="inner">
+    <span class="msg" id="saveMsg">OpenAI key, at least one location, and a CV are required.</span>
+    <button class="btn primary" id="saveBtn" onclick="save()">Save &amp; start</button>
+  </div>
+</div>
+
+<script>
+const state = {
+  locations: [], fields: [], seniority: [], languages: [], emailTo: [], cvPath: "",
+};
+
+// Conclusive LinkedIn geoIds for Swiss metropolitan areas (from LinkedIn's own
+// jobs-guest typeahead). The 9000988x ids are LinkedIn's official
+// "Metropolitan Area" entries; the rest are the canonical Switzerland city ids.
+const SWISS_METROS = [
+  { id: "106693272", displayName: "All of Switzerland" },
+  { id: "90009888",  displayName: "Zürich Metropolitan Area" },
+  { id: "90009886",  displayName: "Geneva Metropolitan Area" },
+  { id: "90009885",  displayName: "Basel Metropolitan Area" },
+  { id: "90009887",  displayName: "Greater Bern Area" },
+  { id: "90009889",  displayName: "Lausanne Metropolitan Area" },
+  { id: "90009890",  displayName: "Lucerne Metropolitan Area" },
+  { id: "90009891",  displayName: "Lugano Metropolitan Area" },
+  { id: "90009892",  displayName: "Sankt Gallen Metropolitan Area" },
+  { id: "103606803", displayName: "Zug, Switzerland" },
+  { id: "100371585", displayName: "Winterthur, Switzerland" },
+  { id: "104929865", displayName: "Biel/Bienne, Switzerland" },
+  { id: "102056024", displayName: "Neuchâtel, Switzerland" },
+  { id: "103351531", displayName: "Fribourg, Switzerland" },
+];
+function renderSwissQuick() {
+  const box = document.getElementById("swissQuick");
+  box.innerHTML = "";
+  SWISS_METROS.forEach((m) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "btn small";
+    b.textContent = "+ " + m.displayName.replace(" Metropolitan Area", "").replace(", Switzerland", "");
+    b.onclick = () => {
+      if (!state.locations.find((x) => x.id === m.id)) state.locations.push({ id: m.id, displayName: m.displayName });
+      renderLocations();
+    };
+    box.appendChild(b);
+  });
+}
+
+// ---------- chip inputs ----------
+function chipInput(inputId, chipsId, listKey) {
+  const input = document.getElementById(inputId);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      const v = input.value.trim();
+      if (v && !state[listKey].includes(v)) state[listKey].push(v);
+      input.value = "";
+      renderChips(chipsId, listKey);
+    } else if (e.key === "Backspace" && !input.value && state[listKey].length) {
+      state[listKey].pop();
+      renderChips(chipsId, listKey);
+    }
+  });
+}
+function renderChips(chipsId, listKey, labelFn) {
+  const box = document.getElementById(chipsId);
+  box.innerHTML = "";
+  state[listKey].forEach((item, i) => {
+    const label = labelFn ? labelFn(item) : item;
+    const el = document.createElement("span");
+    el.className = "chip";
+    el.innerHTML = `<span></span><button aria-label="remove">×</button>`;
+    el.querySelector("span").textContent = label;
+    el.querySelector("button").onclick = () => { state[listKey].splice(i, 1); renderChips(chipsId, listKey, labelFn); refreshSaveState(); };
+    box.appendChild(el);
+  });
+  refreshSaveState();
+}
+chipInput("fieldsInput", "fieldsChips", "fields");
+chipInput("emailToInput", "emailToChips", "emailTo");
+
+// ---------- checklists (seniority, languages) ----------
+const LANGS = ["English", "German", "French", "Italian", "Spanish", "Portuguese", "Dutch", "Greek"];
+const SENIORITY = ["Internship", "Entry level", "Junior", "Mid level", "Senior", "Lead", "Principal", "Manager", "Director", "Executive"];
+function renderChecklist(containerId, options, listKey) {
+  const box = document.getElementById(containerId);
+  box.innerHTML = "";
+  const all = [...options];
+  state[listKey].forEach((v) => { if (!all.includes(v)) all.push(v); });
+  all.forEach((opt) => {
+    const on = state[listKey].includes(opt);
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "opt" + (on ? " on" : "");
+    b.textContent = opt;
+    b.onclick = () => {
+      state[listKey] = on ? state[listKey].filter((x) => x !== opt) : [...state[listKey], opt];
+      renderChecklist(containerId, options, listKey);
+      refreshSaveState();
+    };
+    box.appendChild(b);
+  });
+}
+function customAdd(inputId, containerId, options, listKey) {
+  const input = document.getElementById(inputId);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      const v = input.value.trim();
+      if (v && !state[listKey].includes(v)) state[listKey].push(v);
+      input.value = "";
+      renderChecklist(containerId, options, listKey);
+      refreshSaveState();
+    }
+  });
+}
+customAdd("senCustom", "senChecklist", SENIORITY, "seniority");
+customAdd("langCustom", "langChecklist", LANGS, "languages");
+
+// ---------- model select ----------
+function onModelChange() {
+  const custom = document.getElementById("modelSelect").value === "__custom__";
+  document.getElementById("modelCustom").classList.toggle("hidden", !custom);
+}
+function modelValue() {
+  const sel = document.getElementById("modelSelect").value;
+  if (sel === "__custom__") return document.getElementById("modelCustom").value.trim() || "gpt-5.4-nano";
+  return sel;
+}
+
+// ---------- location search ----------
+let locTimer = null;
+function onLocSearch() {
+  clearTimeout(locTimer);
+  const q = document.getElementById("locSearch").value.trim();
+  const box = document.getElementById("locResults");
+  if (q.length < 2) { box.classList.add("hidden"); return; }
+  locTimer = setTimeout(async () => {
+    try {
+      const res = await fetch("/api/setup/resolve-location?q=" + encodeURIComponent(q));
+      const data = await res.json();
+      box.innerHTML = "";
+      if (data.error) { box.innerHTML = `<div style="cursor:default;color:var(--muted)">${data.error}</div>`; box.classList.remove("hidden"); return; }
+      (data.results || []).slice(0, 8).forEach((r) => {
+        const d = document.createElement("div");
+        d.textContent = r.displayName;
+        d.onclick = () => {
+          if (!state.locations.find((x) => x.id === r.id)) state.locations.push(r);
+          document.getElementById("locSearch").value = "";
+          box.classList.add("hidden");
+          renderLocations();
+        };
+        box.appendChild(d);
+      });
+      box.classList.toggle("hidden", (data.results || []).length === 0);
+    } catch (e) { box.classList.add("hidden"); }
+  }, 300);
+}
+function renderLocations() {
+  const box = document.getElementById("locChips");
+  box.innerHTML = "";
+  state.locations.forEach((loc, i) => {
+    const el = document.createElement("span");
+    el.className = "chip";
+    el.innerHTML = `<span></span><button>×</button>`;
+    el.querySelector("span").textContent = loc.displayName;
+    el.querySelector("button").onclick = () => { state.locations.splice(i, 1); renderLocations(); };
+    box.appendChild(el);
+  });
+  refreshSaveState();
+}
+
+// ---------- resilient fetch ----------
+// Always resolves to an object; never leaves the UI hanging. Times out and
+// reports the real reason (network error, timeout, or a non-JSON response).
+async function apiJSON(url, opts, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs || 30000);
+  try {
+    const res = await fetch(url, { ...(opts || {}), signal: ctrl.signal });
+    const text = await res.text();
+    try { return JSON.parse(text); }
+    catch { return { ok: false, message: "Unexpected response (HTTP " + res.status + "). Try again." }; }
+  } catch (e) {
+    if (e.name === "AbortError") return { ok: false, message: "Timed out — check your internet connection and try again." };
+    return { ok: false, message: "Request failed: " + (e.message || e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---------- OpenAI test ----------
+async function testOpenAI() {
+  const s = document.getElementById("openaiStatus");
+  const btn = document.querySelector('button[onclick="testOpenAI()"]');
+  if (btn) btn.disabled = true;
+  s.textContent = "Testing… (a few seconds)"; s.className = "status";
+  const d = await apiJSON("/api/setup/test-openai", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: val("openaiKey"), model: modelValue() }),
+  }, 30000);
+  s.textContent = d.message || (d.ok ? "OK" : "Failed."); s.className = "status " + (d.ok ? "ok" : "err");
+  if (btn) btn.disabled = false;
+}
+
+// ---------- CV upload ----------
+async function uploadCV() {
+  const f = document.getElementById("cvFile").files[0];
+  const s = document.getElementById("cvStatus");
+  if (!f) return;
+  s.textContent = "Uploading..."; s.className = "status";
+  const fd = new FormData(); fd.append("cv", f);
+  const d = await apiJSON("/api/setup/cv", { method: "POST", body: fd }, 60000);
+  showCvResult(d, s);
+  refreshSaveState();
+}
+
+function showCvResult(d, s) {
+  if (!d.ok) { s.textContent = d.message; s.className = "status err"; return; }
+  state.cvPath = d.path;
+  if (d.textExtracted) {
+    s.textContent = `✓ Read your CV successfully — ${Number(d.chars).toLocaleString()} characters of text.`;
+    s.className = "status ok";
+  } else {
+    s.textContent = "⚠ Saved, but no text could be read from this file. Try a text-based PDF, or a .txt / .md CV.";
+    s.className = "status err";
+  }
+}
+
+// Desktop app: use a native file dialog (the webview's file input can't open one).
+async function pickCV() {
+  const s = document.getElementById("cvStatus");
+  s.textContent = "Opening file picker…"; s.className = "status";
+  const d = await apiJSON("/api/setup/pick-cv", { method: "POST" }, 120000);
+  showCvResult(d, s);
+  refreshSaveState();
+}
+
+// ---------- email ----------
+const PROVIDERS = {
+  gmail:   { host: "smtp.gmail.com", port: 587, hint: "Gmail needs an <b>App Password</b> (Google Account → Security → 2-Step Verification → App passwords), not your normal password." },
+  outlook: { host: "smtp-mail.outlook.com", port: 587, hint: "Outlook may require an app password if 2FA is on." },
+  icloud:  { host: "smtp.mail.me.com", port: 587, hint: "iCloud Mail requires an app-specific password from appleid.apple.com." },
+  yahoo:   { host: "smtp.mail.yahoo.com", port: 465, hint: "Yahoo requires an app password (Account Security → Generate app password)." },
+  custom:  { host: "", port: 587, hint: "Enter your mail provider's SMTP host and port." },
+};
+function toggleEmail() {
+  document.getElementById("emailFields").classList.toggle("hidden", !document.getElementById("emailOn").checked);
+  applyProvider();
+}
+function applyProvider() {
+  const p = PROVIDERS[val("emailProvider")] || PROVIDERS.custom;
+  document.getElementById("appPwHint").innerHTML = p.hint;
+  document.getElementById("customSmtp").classList.toggle("hidden", val("emailProvider") !== "custom");
+  if (val("emailProvider") !== "custom") {
+    document.getElementById("emailHost").value = p.host;
+    document.getElementById("emailPort").value = p.port;
+  }
+}
+function emailConfig() {
+  const provider = val("emailProvider");
+  const p = PROVIDERS[provider] || PROVIDERS.custom;
+  const host = provider === "custom" ? val("emailHost") : p.host;
+  const port = Number(provider === "custom" ? val("emailPort") : p.port) || 587;
+  return { host, port, secure: port === 465, user: val("emailUser"), pass: val("emailPass"), from: val("emailUser"), to: state.emailTo };
+}
+async function testEmail() {
+  const s = document.getElementById("emailStatus");
+  s.textContent = "Sending..."; s.className = "status";
+  const d = await apiJSON("/api/setup/test-email", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(emailConfig()),
+  }, 25000);
+  s.textContent = d.message || (d.ok ? "Sent." : "Failed."); s.className = "status " + (d.ok ? "ok" : "err");
+}
+
+// ---------- save ----------
+var alreadyConfigured = false;
+function val(id) { return (document.getElementById(id).value || "").trim(); }
+function refreshSaveState() {
+  const haveKey = val("openaiKey") || alreadyConfigured;
+  const haveCv = state.cvPath || alreadyConfigured;
+  const ready = haveKey && state.locations.length > 0 && haveCv;
+  document.getElementById("saveBtn").disabled = !ready;
+  const msg = document.getElementById("saveMsg");
+  if (ready) { msg.textContent = "Ready to go."; }
+  else {
+    const missing = [];
+    if (!haveKey) missing.push("OpenAI key");
+    if (state.locations.length === 0) missing.push("a location");
+    if (!haveCv) missing.push("a CV");
+    msg.textContent = "Still need: " + missing.join(", ") + ".";
+  }
+}
+document.getElementById("openaiKey").addEventListener("input", refreshSaveState);
+
+async function save() {
+  const btn = document.getElementById("saveBtn");
+  btn.disabled = true; document.getElementById("saveMsg").textContent = "Saving...";
+  const payload = {
+    openaiKey: val("openaiKey"), openaiModel: modelValue(),
+    emailEnabled: document.getElementById("emailOn").checked, email: emailConfig(),
+    desiredFields: state.fields, seniority: state.seniority, languages: state.languages,
+    locations: state.locations, onlyMyLanguage: document.getElementById("onlyMyLang").checked,
+    schedule: val("schedule"), dateSincePosted: val("datePosted"), jobType: val("jobType"), cvPath: state.cvPath,
+    runOnStartup: document.getElementById("runOnStartup").checked,
+    maxJobs: Number(val("maxJobs")) || 50,
+    minScore: Number(val("minScore")),
+  };
+  const d = await apiJSON("/api/setup/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }, 30000);
+  if (d.ok) {
+    document.getElementById("form").classList.add("hidden");
+    document.getElementById("savebar").classList.add("hidden");
+    document.getElementById("success").classList.remove("hidden");
+    document.getElementById("successMsg").textContent = d.message;
+    window.scrollTo(0, 0);
+  } else {
+    document.getElementById("saveMsg").innerHTML = `<span class="err">${d.message}</span>`;
+    btn.disabled = false;
+  }
+}
+
+// initial render: default to English selected, plus checklists & provider hint
+state.languages = ["English"];
+renderChecklist("senChecklist", SENIORITY, "seniority");
+renderChecklist("langChecklist", LANGS, "languages");
+renderSwissQuick();
+onModelChange();
+applyProvider();
+refreshSaveState();
+
+// In the desktop app, swap the (non-functional) HTML file input for a button
+// that opens a native file dialog.
+apiJSON("/api/setup/status", {}, 8000).then((st) => {
+  if (!st) return;
+  if (st.desktop) {
+    document.getElementById("cvFile").classList.add("hidden");
+    document.getElementById("cvPickBtn").classList.remove("hidden");
+  }
+  // Reconfiguring: show "cancel & back" and prefill everything from the saved config.
+  if (st.configured) {
+    alreadyConfigured = true;
+    document.getElementById("backLink").classList.remove("hidden");
+    prefill(st.values || {});
+  }
+});
+
+function setSelect(id, value) {
+  const el = document.getElementById(id);
+  if (el && [...el.options].some((o) => o.value === value)) el.value = value;
+}
+function setModel(m) {
+  const sel = document.getElementById("modelSelect");
+  if ([...sel.options].some((o) => o.value === m)) sel.value = m;
+  else { sel.value = "__custom__"; document.getElementById("modelCustom").value = m; }
+  onModelChange();
+}
+function prefill(v) {
+  state.fields = Array.isArray(v.desiredFields) ? v.desiredFields.slice() : [];
+  state.seniority = Array.isArray(v.seniority) ? v.seniority.slice() : [];
+  state.languages = (Array.isArray(v.languages) && v.languages.length) ? v.languages.slice() : ["English"];
+  const ids = Array.isArray(v.jobLocations) ? v.jobLocations : [];
+  const names = Array.isArray(v.targetLocations) ? v.targetLocations : [];
+  state.locations = ids.map((id, i) => ({ id, displayName: names[i] || id }));
+  state.cvPath = v.cvPath || "";
+  renderChips("fieldsChips", "fields");
+  renderChecklist("senChecklist", SENIORITY, "seniority");
+  renderChecklist("langChecklist", LANGS, "languages");
+  renderLocations();
+  if (v.schedule) setSelect("schedule", v.schedule);
+  if (v.dateSincePosted) setSelect("datePosted", v.dateSincePosted);
+  if (v.jobType !== undefined) setSelect("jobType", v.jobType);
+  if (v.maxJobs) document.getElementById("maxJobs").value = v.maxJobs;
+  if (v.minScore !== undefined && v.minScore !== null) document.getElementById("minScore").value = v.minScore;
+  document.getElementById("onlyMyLang").checked = !!v.languageFilterEnabled;
+  if (v.model) setModel(v.model);
+  document.getElementById("openaiKey").placeholder = "Leave blank to keep your saved key";
+  if (state.cvPath) {
+    const s = document.getElementById("cvStatus");
+    s.textContent = "Using your saved CV. Choose a file only if you want to replace it.";
+    s.className = "status ok";
+  }
+  refreshSaveState();
+}
+</script>
+</body>
+</html>

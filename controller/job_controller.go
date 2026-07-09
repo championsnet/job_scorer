@@ -18,19 +18,30 @@ import (
 )
 
 type JobController struct {
-	config         *config.Config
-	scraper        *scraper.LinkedInScraper
-	filter         *filter.Filter
-	evaluator      *evaluator.Evaluator
-	cvReader       *cv.CVReader
-	notifier       *notification.EmailNotifier
-	storage        storage.JobStorage
-	checkpoint     storage.CheckpointStorage
+	config          *config.Config
+	scraper         *scraper.LinkedInScraper
+	filter          *filter.Filter
+	evaluator       *evaluator.Evaluator
+	cvReader        *cv.CVReader
+	notifier        *notification.EmailNotifier
+	storage         storage.JobStorage
+	checkpoint      storage.CheckpointStorage
 	runSummaryStore storage.RunSummaryStore
-	jobTracker     storage.JobTrackerInterface
-	rateLimiter    *utils.RateLimiter
-	logger         *utils.Logger
-	gcsStorage     *storage.GCSStorage // Optional GCS storage
+	jobTracker      storage.JobTrackerInterface
+	rateLimiter     *utils.RateLimiter
+	logger          *utils.Logger
+	gcsStorage      *storage.GCSStorage        // Optional GCS storage
+	progress        func(stage, detail string) // Optional live progress callback
+}
+
+// SetProgress registers a callback invoked at each pipeline stage (with an
+// optional detail like "45 of 200") so callers can show what the scan is doing.
+func (jc *JobController) SetProgress(fn func(stage, detail string)) { jc.progress = fn }
+
+func (jc *JobController) reportStage(stage, detail string) {
+	if jc.progress != nil {
+		jc.progress(stage, detail)
+	}
 }
 
 func NewJobController(cfg *config.Config) (*JobController, error) {
@@ -129,8 +140,14 @@ func NewJobController(cfg *config.Config) (*JobController, error) {
 	// Based on conservative API limits:
 	// - 14400 requests per day = 10 requests per minute (conservative)
 	// - 18000 tokens per minute (using 17000 for safety margin)
+	// Respect the configured request rate (it also auto-adjusts down from the
+	// provider's response headers if we're going too fast).
+	rpm := cfg.RateLimit.MaxRequests
+	if rpm <= 0 {
+		rpm = 60
+	}
 	tokenRateLimiter := utils.NewTokenRateLimiter(
-		10, // Conservative: 14400 RPD / 1440 minutes = 10 RPM
+		rpm,
 		cfg.RateLimit.TimeWindow,
 		cfg.RateLimit.MaxTokensPerMinute,
 		time.Minute,
@@ -204,13 +221,13 @@ func (jc *JobController) SearchAndFilterJobsWithRunID(runID string) error {
 			StageCounts: stageCounts,
 			Config:      configSnapshot,
 			LLMUsage: models.LLMUsageSnapshot{
-				Calls:                 usage.Calls,
-				InputTokens:           usage.InputTokens,
-				CachedInputTokens:     usage.CachedInputTokens,
-				NonCachedInputTokens:  usage.NonCachedInputTokens,
-				BillableInputTokens:   usage.BillableInputTokens,
-				OutputTokens:          usage.OutputTokens,
-				TotalTokens:           usage.TotalTokens,
+				Calls:                usage.Calls,
+				InputTokens:          usage.InputTokens,
+				CachedInputTokens:    usage.CachedInputTokens,
+				NonCachedInputTokens: usage.NonCachedInputTokens,
+				BillableInputTokens:  usage.BillableInputTokens,
+				OutputTokens:         usage.OutputTokens,
+				TotalTokens:          usage.TotalTokens,
 			},
 			Notification: notif,
 			ErrorMessage: errMsg,
@@ -221,6 +238,7 @@ func (jc *JobController) SearchAndFilterJobsWithRunID(runID string) error {
 	}
 
 	// STEP 1: FETCH JOBS
+	jc.reportStage("Searching LinkedIn for jobs…", "")
 	jc.logger.PipelineStart("JOB FETCHING", "Scraping LinkedIn for job postings from all configured locations")
 	allJobs, err := jc.fetchJobsFromAllLocations()
 	if err != nil {
@@ -257,6 +275,7 @@ func (jc *JobController) SearchAndFilterJobsWithRunID(runID string) error {
 	}
 
 	// STEP 3: PREFILTER JOBS
+	jc.reportStage("Filtering by your criteria…", fmt.Sprintf("Found %d jobs", len(allJobs)))
 	jc.logger.PipelineStart("PREFILTERING", "Applying location, language and seniority filters")
 	prefilteredJobs := jc.filter.PrefilterJobs(newJobs)
 	filteredOutCount := len(newJobs) - len(prefilteredJobs)
@@ -288,6 +307,7 @@ func (jc *JobController) SearchAndFilterJobsWithRunID(runID string) error {
 	jc.saveExcludedCheckpoint(prefilterExcludedJobs, "prefiltered", metadata)
 
 	// STEP 4: LLM INITIAL EVALUATION
+	jc.reportStage("Scoring jobs with AI…", fmt.Sprintf("%d passed filters", len(prefilteredJobs)))
 	jc.logger.PipelineStart("LLM INITIAL EVALUATION", "AI scoring of jobs for basic suitability")
 	evaluatedJobs, err := jc.evaluateJobsWithRateLimit(prefilteredJobs)
 	if err != nil {
@@ -322,6 +342,7 @@ func (jc *JobController) SearchAndFilterJobsWithRunID(runID string) error {
 	jc.saveExcludedCheckpoint(promisingExcludedJobs, "promising", metadata)
 
 	// STEP 6: CV-BASED EVALUATION
+	jc.reportStage("Matching jobs to your CV…", fmt.Sprintf("%d promising jobs to check", len(promisingJobs)))
 	jc.logger.PipelineStart("CV MATCHING", "Detailed AI evaluation with CV comparison")
 	finalEvaluatedJobs, err := jc.evaluateJobsWithCV(promisingJobs)
 	if err != nil {
@@ -342,6 +363,7 @@ func (jc *JobController) SearchAndFilterJobsWithRunID(runID string) error {
 	}
 
 	// STEP 7: NOTIFICATION FILTERING
+	jc.reportStage("Selecting the best matches…", "")
 	jc.logger.PipelineStart("NOTIFICATION FILTER", "Selecting jobs that should trigger email alerts")
 	notificationJobs := jc.filter.FilterNotificationJobs(finalEvaluatedJobs)
 	notificationExcludedJobs := buildNotificationExcludedJobs(finalEvaluatedJobs, notificationJobs, jc.filter)
@@ -356,11 +378,13 @@ func (jc *JobController) SearchAndFilterJobsWithRunID(runID string) error {
 	// STEP 7.5: LLM VALIDATION (TWO-STAGE) - Optional
 	var validatedNotificationJobs []*models.Job
 	var validationExcludedJobs []*models.Job
-	if jc.config.Policy.Pipeline.EnableFinalValidation {
+	if jc.config.Policy.Pipeline.EnableFinalValidation && len(notificationJobs) > 0 {
+		jc.reportStage("Double-checking the best matches…", fmt.Sprintf("0 of %d", len(notificationJobs)))
 		jc.logger.PipelineStart("LLM VALIDATION", "Validating notification jobs with second LLM pass")
 		var validationRejected int
 		redFlagPhrases := jc.config.Policy.Pipeline.RedFlagPhrases
-		for _, job := range notificationJobs {
+		for idx, job := range notificationJobs {
+			jc.reportStage("Double-checking the best matches…", fmt.Sprintf("%d of %d", idx+1, len(notificationJobs)))
 			// Programmatic rejection: missing/placeholder description
 			desc := strings.ToLower(strings.TrimSpace(job.JobDescription))
 			if (jc.config.Policy.Pipeline.RejectEmptyDescriptions && desc == "") ||
@@ -432,6 +456,7 @@ func (jc *JobController) SearchAndFilterJobsWithRunID(runID string) error {
 	jc.saveExcludedCheckpoint(validationExcludedJobs, "validated_notification", metadata)
 
 	// STEP 8: SEND NOTIFICATIONS
+	jc.reportStage("Wrapping up…", "")
 	jc.logger.PipelineStart("EMAIL NOTIFICATION", "Sending email alerts for selected jobs")
 	if len(validatedNotificationJobs) > 0 {
 		for i, job := range validatedNotificationJobs {
@@ -498,49 +523,91 @@ func (jc *JobController) SearchAndFilterJobsWithRunID(runID string) error {
 	return nil
 }
 
+// searchKeywords returns one LinkedIn keyword search per desired field so we
+// fetch jobs relevant to the candidate instead of every job in the city.
+// Returns [""] (no keyword = all jobs) when no fields are configured.
+func (jc *JobController) searchKeywords() []string {
+	var kws []string
+	seen := map[string]bool{}
+	for _, f := range jc.config.Policy.CandidateProfile.DesiredFields {
+		f = strings.TrimSpace(f)
+		if f == "" || seen[strings.ToLower(f)] {
+			continue
+		}
+		seen[strings.ToLower(f)] = true
+		kws = append(kws, f)
+	}
+	if len(kws) == 0 {
+		return []string{""}
+	}
+	return kws
+}
+
 func (jc *JobController) fetchJobsFromAllLocations() ([]*models.Job, error) {
 	var allJobs []*models.Job
 	totalErrors := 0
 	seenJobIDs := make(map[string]bool) // Track unique job IDs
 	var duplicateCount int
 
+	keywords := jc.searchKeywords()
+	maxPerLocation := jc.config.App.MaxJobs
+	perKeyword := maxPerLocation
+	if len(keywords) > 1 && maxPerLocation > 0 {
+		perKeyword = maxPerLocation / len(keywords)
+		if perKeyword < 5 {
+			perKeyword = 5
+		}
+	}
+
+	accumulated := 0
+	jc.scraper.SetProgress(func(n int) {
+		jc.reportStage("Searching LinkedIn for jobs…", fmt.Sprintf("Found %d jobs so far…", accumulated+n))
+	})
+	defer jc.scraper.SetProgress(nil)
+
 	for i, location := range jc.config.App.Locations {
 		jc.logger.Progress(i+1, len(jc.config.App.Locations), "Scraping location: %s", location)
+		locationCount := 0
 
-		options := scraper.QueryOptions{
-			Location:        location,
-			DateSincePosted: jc.config.Policy.Scraper.DateSincePosted,
-			Limit:           jc.config.App.MaxJobs,
-		}
-
-		jobs, err := jc.scraper.Query(options)
-		if err != nil {
-			totalErrors++
-			jc.logger.JobDetail("❌ Failed to fetch from location %s: %v", location, err)
-			// Continue to next location even if one fails
-			continue
-		}
-
-		// Deduplicate jobs based on JobID
-		var uniqueJobs []*models.Job
-		for _, job := range jobs {
-			if job.JobID != "" && seenJobIDs[job.JobID] {
-				duplicateCount++
+		for _, keyword := range keywords {
+			if maxPerLocation > 0 && locationCount >= maxPerLocation {
+				break
+			}
+			if keyword != "" {
+				jc.logger.JobDetail("Searching \"%s\" in %s", keyword, location)
+			}
+			options := scraper.QueryOptions{
+				Location:        location,
+				Keyword:         keyword,
+				DateSincePosted: jc.config.Policy.Scraper.DateSincePosted,
+				JobType:         jc.config.Policy.Scraper.JobType,
+				Limit:           perKeyword,
+			}
+			jobs, err := jc.scraper.Query(options)
+			if err != nil {
+				totalErrors++
+				jc.logger.JobDetail("❌ Failed to fetch from location %s (keyword %q): %v", location, keyword, err)
 				continue
 			}
-			if job.JobID != "" {
-				seenJobIDs[job.JobID] = true
+			for _, job := range jobs {
+				if job.JobID != "" && seenJobIDs[job.JobID] {
+					duplicateCount++
+					continue
+				}
+				if job.JobID != "" {
+					seenJobIDs[job.JobID] = true
+				}
+				allJobs = append(allJobs, job)
+				locationCount++
 			}
-			uniqueJobs = append(uniqueJobs, job)
+			accumulated = len(allJobs)
 		}
 
-		jc.logger.JobDetail("✅ Found %d unique jobs from location %s (filtered %d duplicates)",
-			len(uniqueJobs), location, duplicateCount)
-		allJobs = append(allJobs, uniqueJobs...)
+		jc.logger.JobDetail("✅ %d unique jobs so far after location %s", len(allJobs), location)
 	}
 
 	if totalErrors > 0 {
-		jc.logger.Warning("⚠️  %d location(s) failed to fetch", totalErrors)
+		jc.logger.Warning("⚠️  %d search(es) failed to fetch", totalErrors)
 	}
 	if duplicateCount > 0 {
 		jc.logger.Info("🔍 Filtered out %d duplicate job postings", duplicateCount)
@@ -563,6 +630,10 @@ func (jc *JobController) evaluateJobsWithRateLimit(jobs []*models.Job) ([]*model
 	}
 
 	jc.logger.Info("Using batch processing for %d jobs (batch size: %d)", len(jobs), batchSize)
+	jc.evaluator.SetProgress(func(done, total int) {
+		jc.reportStage("Scoring jobs with AI…", fmt.Sprintf("Scored %d of %d", done, total))
+	})
+	defer jc.evaluator.SetProgress(nil)
 	evaluatedJobs, err := jc.evaluator.BatchEvaluateJobs(jobs, batchSize)
 	if err != nil {
 		jc.logger.Warning("Batch evaluation failed, falling back to individual evaluation: %v", err)
@@ -588,6 +659,7 @@ func (jc *JobController) evaluateJobsIndividually(jobs []*models.Job) ([]*models
 
 	// Process jobs sequentially to respect rate limit
 	for i, job := range jobs {
+		jc.reportStage("Scoring jobs with AI…", fmt.Sprintf("Scored %d of %d", i+1, len(jobs)))
 		jc.logger.Progress(i+1, len(jobs), "Evaluating: %s at %s", job.Position, job.Company)
 
 		// Wait for rate limiter before making request
@@ -635,6 +707,7 @@ func (jc *JobController) evaluateJobsWithCV(jobs []*models.Job) ([]*models.Job, 
 
 	for i, job := range jobs {
 		jc.logger.Debug("CV evaluation %d/%d: %s at %s", i+1, len(jobs), job.Position, job.Company)
+		jc.reportStage("Matching jobs to your CV…", fmt.Sprintf("Matched %d of %d", i+1, len(jobs)))
 
 		// Wait for rate limiter before making request
 		if err := jc.rateLimiter.Acquire(); err != nil {
@@ -916,9 +989,9 @@ func (jc *JobController) GetAnalyticsOverview() (map[string]interface{}, error) 
 
 	return map[string]interface{}{
 		"runs": map[string]interface{}{
-			"total":   totalRuns,
-			"success": successCount,
-			"failed":  failedCount,
+			"total":           totalRuns,
+			"success":         successCount,
+			"failed":          failedCount,
 			"avg_duration_ms": avgDurationMs,
 		},
 		"funnel": map[string]interface{}{
@@ -932,9 +1005,9 @@ func (jc *JobController) GetAnalyticsOverview() (map[string]interface{}, error) 
 			"email_sent":      totalEmailSent,
 		},
 		"llm_usage": map[string]interface{}{
-			"calls":          totalLLMCalls,
-			"input_tokens":   totalInputTokens,
-			"output_tokens":  totalOutputTokens,
+			"calls":         totalLLMCalls,
+			"input_tokens":  totalInputTokens,
+			"output_tokens": totalOutputTokens,
 		},
 		"recent_runs": summaries,
 	}, nil

@@ -31,6 +31,9 @@ type OpenAIRequest struct {
 	Model               string    `json:"model"`
 	Messages            []Message `json:"messages"`
 	MaxCompletionTokens int       `json:"max_completion_tokens,omitempty"`
+	// ReasoningEffort is only sent for reasoning models (o-series / GPT-5) to
+	// minimize reasoning tokens; omitted for regular models that reject it.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type Message struct {
@@ -73,13 +76,13 @@ type TokenUsageSnapshot struct {
 }
 
 type TokenUsageTotals struct {
-	Calls                 int
-	InputTokens           int
-	CachedInputTokens     int
-	NonCachedInputTokens  int
-	BillableInputTokens   int
-	OutputTokens          int
-	TotalTokens           int
+	Calls                int
+	InputTokens          int
+	CachedInputTokens    int
+	NonCachedInputTokens int
+	BillableInputTokens  int
+	OutputTokens         int
+	TotalTokens          int
 }
 
 func NewOpenAIClient(cfg *config.Config, rateLimiter *utils.RateLimiter) *OpenAIClient {
@@ -128,6 +131,7 @@ func (g *OpenAIClient) ChatCompletion(prompt string, maxTokens int) (string, err
 			},
 		},
 		MaxCompletionTokens: maxTokens,
+		ReasoningEffort:     config.ReasoningEffortFor(g.model),
 	}
 
 	jsonData, err := json.Marshal(requestBody)

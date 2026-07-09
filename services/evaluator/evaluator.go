@@ -23,6 +23,16 @@ type Evaluator struct {
 	policy       config.Policy
 	rateLimiter  *utils.RateLimiter
 	logger       *utils.Logger
+	onProgress   func(done, total int)
+}
+
+// SetProgress registers a callback for batch-scoring progress (done, total).
+func (e *Evaluator) SetProgress(fn func(done, total int)) { e.onProgress = fn }
+
+func (e *Evaluator) reportProgress(done, total int) {
+	if e.onProgress != nil {
+		e.onProgress(done, total)
+	}
 }
 
 func NewEvaluator(openAIClient *OpenAIClient, cvReader *cv.CVReader, linkedInScraper *scraper.LinkedInScraper, rateLimiter *utils.RateLimiter, policy config.Policy, logger *utils.Logger) *Evaluator {
@@ -167,6 +177,7 @@ func (e *Evaluator) BatchEvaluateJobs(jobs []*models.Job, batchSize int) ([]*mod
 		}
 
 		batch := jobs[i:end]
+		e.reportProgress(i, len(jobs))
 		e.logger.Progress(i+1, len(jobs), "Batch evaluating jobs %d-%d", i+1, end)
 
 		// Apply rate limiting before API call
@@ -194,6 +205,7 @@ func (e *Evaluator) BatchEvaluateJobs(jobs []*models.Job, batchSize int) ([]*mod
 		e.logger.Warning("⚠️  %d batch evaluation errors encountered", errorCount)
 	}
 
+	e.reportProgress(len(jobs), len(jobs))
 	return evaluatedJobs, nil
 }
 
@@ -205,9 +217,9 @@ func (e *Evaluator) getBatchInitialPrompt(jobs []*models.Job) string {
 `, i+1, job.Position, job.Company, job.Location)
 	}
 
-	return renderTemplate(e.policy.Evaluation.BatchPromptTemplate, map[string]string{
+	return renderTemplate(e.policy.Evaluation.BatchPromptTemplate, e.promptVars(map[string]string{
 		"JOBS": jobsText,
-	})
+	}))
 }
 
 // parseBatchEvaluationResponse parses responses for multiple jobs
@@ -224,7 +236,14 @@ func (e *Evaluator) parseBatchEvaluationResponse(response string, jobs []*models
 	}
 
 	var batchResults []batchEvalResp
-	if err := json.Unmarshal([]byte(cleanedResponse), &batchResults); err == nil {
+	parseErr := json.Unmarshal([]byte(cleanedResponse), &batchResults)
+	if parseErr != nil || len(batchResults) == 0 {
+		// The model sometimes wraps the array in prose; pull out [ ... ].
+		if arr := extractJSONArray(cleanedResponse); arr != "" {
+			parseErr = json.Unmarshal([]byte(arr), &batchResults)
+		}
+	}
+	if parseErr == nil && len(batchResults) > 0 {
 		// Successfully parsed batch response
 		resultMap := make(map[int]*batchEvalResp)
 		for i := range batchResults {
@@ -264,36 +283,81 @@ func (e *Evaluator) parseBatchEvaluationResponse(response string, jobs []*models
 	return e.fallbackToIndividualEvaluation(jobs)
 }
 
-// fallbackToIndividualEvaluation evaluates jobs individually when batch fails
+// fallbackToIndividualEvaluation re-scores jobs one at a time when a batch call
+// fails to parse — otherwise a single bad batch response would silently drop
+// good jobs (they'd get no score and never be recommended).
 func (e *Evaluator) fallbackToIndividualEvaluation(jobs []*models.Job) []*models.Job {
 	var evaluatedJobs []*models.Job
 	for _, job := range jobs {
-		// Apply a simple evaluation or mark as failed
-		job.Score = nil
-		job.Reason = "Batch evaluation failed, individual evaluation not performed."
-		job.Reasons = []string{"Batch evaluation failed, individual evaluation not performed."}
-		evaluatedJobs = append(evaluatedJobs, job)
+		evaluated, err := e.EvaluateJob(job)
+		if err != nil {
+			job.Score = nil
+			job.Reason = "Evaluation failed: " + err.Error()
+			job.Reasons = []string{job.Reason}
+			evaluatedJobs = append(evaluatedJobs, job)
+			continue
+		}
+		evaluatedJobs = append(evaluatedJobs, evaluated)
 	}
 	return evaluatedJobs
 }
 
+// profileVars returns template variables derived from the candidate profile so
+// that every prompt adapts to the individual user instead of hardcoding a
+// specific field, seniority, location, or language. Empty lists render as a
+// permissive fallback (e.g. "any field") so a not-yet-configured account still
+// scores sensibly rather than rejecting everything.
+func (e *Evaluator) profileVars() map[string]string {
+	p := e.policy.CandidateProfile
+	joinOr := func(items []string, fallback string) string {
+		cleaned := make([]string, 0, len(items))
+		for _, it := range items {
+			if s := strings.TrimSpace(it); s != "" {
+				cleaned = append(cleaned, s)
+			}
+		}
+		if len(cleaned) == 0 {
+			return fallback
+		}
+		return strings.Join(cleaned, ", ")
+	}
+	locations := append([]string{}, p.TargetLocations...)
+	locations = append(locations, p.CommuteLocations...)
+	return map[string]string{
+		"DESIRED_FIELDS":   joinOr(p.DesiredFields, "any field"),
+		"SENIORITY":        joinOr(p.Seniority, "any level"),
+		"TARGET_LOCATIONS": joinOr(locations, "any location"),
+		"LANGUAGES":        joinOr(p.Languages, "any language"),
+	}
+}
+
+// promptVars starts from the candidate profile variables and overlays the
+// per-job values passed in, so every template gets both.
+func (e *Evaluator) promptVars(extra map[string]string) map[string]string {
+	vars := e.profileVars()
+	for k, v := range extra {
+		vars[k] = v
+	}
+	return vars
+}
+
 func (e *Evaluator) getInitialPrompt(job *models.Job) string {
-	return renderTemplate(e.policy.Evaluation.InitialPromptTemplate, map[string]string{
+	return renderTemplate(e.policy.Evaluation.InitialPromptTemplate, e.promptVars(map[string]string{
 		"POSITION": job.Position,
 		"COMPANY":  job.Company,
 		"LOCATION": job.Location,
-	})
+	}))
 }
 
 func (e *Evaluator) getFinalPrompt(job *models.Job, jobDesc, cv string) string {
 	cleanCV := cleanCVForPrompt(cv, e.policy.Evaluation.CVPromptTruncation)
-	return renderTemplate(e.policy.Evaluation.FinalPromptTemplate, map[string]string{
-		"CV":             cleanCV,
-		"POSITION":       job.Position,
-		"COMPANY":        job.Company,
-		"LOCATION":       job.Location,
+	return renderTemplate(e.policy.Evaluation.FinalPromptTemplate, e.promptVars(map[string]string{
+		"CV":              cleanCV,
+		"POSITION":        job.Position,
+		"COMPANY":         job.Company,
+		"LOCATION":        job.Location,
 		"JOB_DESCRIPTION": jobDesc,
-	})
+	}))
 }
 
 // Helper function to clean CV text
@@ -548,6 +612,16 @@ func (e *Evaluator) fixCommonJSONIssues(response string) string {
 	return fixed
 }
 
+// extractJSONArray returns the first bracketed JSON array in text, or "".
+func extractJSONArray(text string) string {
+	start := strings.Index(text, "[")
+	end := strings.LastIndex(text, "]")
+	if start >= 0 && end > start {
+		return text[start : end+1]
+	}
+	return ""
+}
+
 // extractJSONFromText tries to find JSON objects within the text
 func (e *Evaluator) extractJSONFromText(text string) string {
 	// Look for JSON objects starting with { and ending with }
@@ -784,12 +858,12 @@ func (e *Evaluator) getValidationPrompt(job *models.Job) string {
 	if len(shortCV) > e.policy.Evaluation.CVPromptTruncation.ValidationMaxSize {
 		shortCV = shortCV[:e.policy.Evaluation.CVPromptTruncation.ValidationMaxSize] + "..."
 	}
-	return renderTemplate(e.policy.Evaluation.ValidationPromptTemplate, map[string]string{
-		"CV":             shortCV,
+	return renderTemplate(e.policy.Evaluation.ValidationPromptTemplate, e.promptVars(map[string]string{
+		"CV":              shortCV,
 		"JOB_DESCRIPTION": job.JobDescription,
-		"FINAL_SCORE":    fmt.Sprintf("%.1f", finalScore),
-		"FINAL_REASONS":  fmt.Sprintf("%q", finalReasons),
-	})
+		"FINAL_SCORE":     fmt.Sprintf("%.1f", finalScore),
+		"FINAL_REASONS":   fmt.Sprintf("%q", finalReasons),
+	}))
 }
 
 func renderTemplate(template string, values map[string]string) string {

@@ -1,0 +1,21 @@
+# Lightweight image for local/self-host use. Unlike the cloud Dockerfile this
+# needs NO Node build — the setup wizard is embedded in the Go binary.
+FROM golang:1.24-alpine AS build
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /bin/job-scorer .
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+WORKDIR /app
+COPY --from=build /bin/job-scorer /usr/local/bin/job-scorer
+# All writable state (.env, config/, data/) lives under /data so a single
+# mounted volume persists everything across restarts.
+ENV APP_HOME=/data
+ENV PORT=8008
+# No browser inside a container; the user opens http://localhost:8008 themselves.
+ENV NO_BROWSER=true
+EXPOSE 8008
+ENTRYPOINT ["/usr/local/bin/job-scorer"]

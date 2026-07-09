@@ -1,44 +1,23 @@
 {
   "candidateProfile": {
-    "targetLocations": ["Your target city1", "Your target city2"],
-    "commuteLocations": ["Your commute area1", "Your commute area2"],
+    "targetLocations": ["Your city"],
+    "commuteLocations": [],
     "languages": ["English"],
-    "desiredFields": ["Marketing", "Business Development", "Operations", "Administration", "Strategy", "HR"],
-    "seniority": ["Entry", "Junior", "Graduate", "Trainee", "Assistant"]
+    "desiredFields": ["Put any roles/fields you want here, e.g. Marketing, Software Engineering, Finance"],
+    "seniority": ["Any level you want, e.g. Junior, Mid, Senior"]
   },
   "app": {
     "cronSchedule": "0 */1 * * *",
-    "jobLocations": ["10000000", "20000000"]
+    "jobLocations": ["REPLACE_WITH_LINKEDIN_GEOID"]
   },
   "filters": {
-    "unwantedLocations": ["EMEA", "DACH", "Switzerland (Remote)", "Europe", "EU"],
-    "unwantedWordsInTitle": ["Head", "Senior", "Director", "Sr."],
+    "unwantedLocations": [],
+    "unwantedWordsInTitle": [],
     "primaryLanguage": "english",
-    "detectionLanguages": ["english", "german", "french"],
-    "redFlagLanguageKeywords": [
-      "deutsch erforderlich",
-      "german required",
-      "german fluency",
-      "fluent german",
-      "muttersprache deutsch",
-      "german native",
-      "deutschkenntnisse",
-      "fluent in german",
-      "german language skills"
-    ],
-    "nonPrimaryLanguageKeywords": [
-      "stellenausschreibung",
-      "arbeitsplatz",
-      "bewerbung",
-      "lebenslauf",
-      "anstellung",
-      "mitarbeiter",
-      "unternehmen",
-      "gesellschaft"
-    ],
-    "primaryLanguageIndicators": [
-      "english"
-    ],
+    "detectionLanguages": ["english"],
+    "redFlagLanguageKeywords": [],
+    "nonPrimaryLanguageKeywords": [],
+    "primaryLanguageIndicators": [],
     "nonPrimaryKeywordMinCount": 2,
     "nonPrimaryDominanceThreshold": 0.6,
     "nonPrimaryDominanceRatio": 1.5,
@@ -49,10 +28,10 @@
     "minTextLengthForLanguageDetect": 8
   },
   "evaluation": {
-    "initialPromptTemplate": "Rate job 0-10 for candidate targeting entry-level roles in configured locations.\n\nGOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR\nBAD FIELDS: Engineering, Data Science, Finance, Legal, Medical\nGOOD LEVEL: Entry, Junior, Intern, Graduate, Trainee, Assistant\nBAD LEVEL: Senior, Lead, Director, 5+ years\n\nJob: \"{{POSITION}}\" at {{COMPANY}} ({{LOCATION}})\n\nRespond JSON only:\n{\"score\": X, \"recommend\": true/false, \"reasons\": [\"brief reason\"]}",
-    "finalPromptTemplate": "CV vs Job match analysis (0-10).\n\nRED FLAGS (score=0): Required language that does not match candidate profile\nMATCH: Skills, experience level (0-2yrs), configured target locations\nSKILLS: Marketing, Business Dev, Operations, Admin, Strategy, HR\n\nCV:\n{{CV}}\n\nJob: \"{{POSITION}}\" at {{COMPANY}} ({{LOCATION}})\nDescription: {{JOB_DESCRIPTION}}\n\nJSON only:\n{\"finalScore\": X, \"reasons\": [\"key reason\"]}",
-    "batchPromptTemplate": "Rate jobs 0-10 for candidate targeting entry-level roles in configured locations.\n\nGOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR\nBAD FIELDS: Engineering, Data Science, Finance, Legal, Medical\nGOOD LEVEL: Entry, Junior, Intern, Graduate, Trainee, Assistant\nBAD LEVEL: Senior, Lead, Director, 5+ years\n\n{{JOBS}}\nRespond with JSON array:\n[{\"jobId\": 1, \"score\": X, \"recommend\": true/false, \"reasons\": [\"brief reason\"]}, ...]",
-    "validationPromptTemplate": "Validate job recommendation. Check for: wrong field, seniority, German requirements, skill mismatch.\n\nCV: {{CV}}\n\nJob: {{JOB_DESCRIPTION}}\nPrevious: score={{FINAL_SCORE}}, reasons={{FINAL_REASONS}}\n\nJSON only: {\"valid\": true/false, \"reason\": \"brief\"}",
+    "initialPromptTemplate": "Rate this job 0-10 for how well it fits the candidate below.\n\nCANDIDATE WANTS\n- Fields/roles: {{DESIRED_FIELDS}}\n- Seniority: {{SENIORITY}}\n- Locations: {{TARGET_LOCATIONS}}\n- Speaks: {{LANGUAGES}}\n\nScore HIGH when the role's field and seniority match what the candidate wants. Score LOW when it is a different field, a much more senior role than wanted, or clearly requires a language the candidate does not speak.\n\nJob: \"{{POSITION}}\" at {{COMPANY}} ({{LOCATION}})\n\nRespond JSON only:\n{\"score\": X, \"recommend\": true/false, \"reasons\": [\"brief reason\"]}",
+    "finalPromptTemplate": "CV vs Job match analysis (0-10).\n\nCANDIDATE PROFILE\n- Fields/roles: {{DESIRED_FIELDS}}\n- Seniority: {{SENIORITY}}\n- Locations: {{TARGET_LOCATIONS}}\n- Speaks: {{LANGUAGES}}\n\nRED FLAG (score 0): the job requires a language the candidate does not speak, or is far outside the candidate's field/level.\nMATCH on: skills and experience shown in the CV, seniority, and location fit.\n\nCV:\n{{CV}}\n\nJob: \"{{POSITION}}\" at {{COMPANY}} ({{LOCATION}})\nDescription: {{JOB_DESCRIPTION}}\n\nJSON only:\n{\"finalScore\": X, \"reasons\": [\"key reason\"]}",
+    "batchPromptTemplate": "Rate each job 0-10 for how well it fits the candidate below.\n\nCANDIDATE WANTS\n- Fields/roles: {{DESIRED_FIELDS}}\n- Seniority: {{SENIORITY}}\n- Locations: {{TARGET_LOCATIONS}}\n- Speaks: {{LANGUAGES}}\n\nScore HIGH when the role's field and seniority match what the candidate wants; LOW for a different field, a much more senior role, or a required language the candidate does not speak.\n\n{{JOBS}}\nRespond with JSON array:\n[{\"jobId\": 1, \"score\": X, \"recommend\": true/false, \"reasons\": [\"brief reason\"]}, ...]",
+    "validationPromptTemplate": "Validate this job recommendation. Check for mismatches in field, seniority, a required language the candidate does not speak, or a skills mismatch.\n\nCandidate fields: {{DESIRED_FIELDS}}; seniority: {{SENIORITY}}; speaks: {{LANGUAGES}}.\n\nCV: {{CV}}\n\nJob: {{JOB_DESCRIPTION}}\nPrevious: score={{FINAL_SCORE}}, reasons={{FINAL_REASONS}}\n\nJSON only: {\"valid\": true/false, \"reason\": \"brief\"}",
     "maxTokens": {
       "initial": 256,
       "final": 512,
@@ -74,10 +53,6 @@
     "rejectEmptyDescriptions": true,
     "rejectPlaceholderDescription": true,
     "redFlagPhrases": [
-      "german required",
-      "fluency in german",
-      "fluent german",
-      "deutsch erforderlich",
       "job description not available",
       "not available"
     ]

@@ -35,6 +35,11 @@ type FilterPolicy struct {
 	UnwantedLocations    []string `json:"unwantedLocations"`
 	UnwantedWordsInTitle []string `json:"unwantedWordsInTitle"`
 
+	// LanguageFilterEnabled turns on rejecting jobs that are not in the
+	// candidate's language(s). Off by default so the tool is universal; the
+	// setup wizard enables it for users who only want jobs in their language.
+	LanguageFilterEnabled bool `json:"languageFilterEnabled"`
+
 	PrimaryLanguage            string   `json:"primaryLanguage"`
 	DetectionLanguages         []string `json:"detectionLanguages"`
 	RedFlagLanguageKeywords    []string `json:"redFlagLanguageKeywords"`
@@ -116,7 +121,9 @@ type CVPolicy struct {
 }
 
 type ScraperPolicy struct {
-	DateSincePosted            string   `json:"dateSincePosted"`
+	DateSincePosted string `json:"dateSincePosted"`
+	JobType         string `json:"jobType"` // "", full-time, part-time, contract, internship, temporary
+
 	PaginationBatchSize        int      `json:"paginationBatchSize"`
 	MaxConsecutiveErrors       int      `json:"maxConsecutiveErrors"`
 	MaxRequestRetries          int      `json:"maxRequestRetries"`
@@ -165,44 +172,28 @@ func loadPolicy(path string) (Policy, error) {
 func defaultPolicy() Policy {
 	return Policy{
 		CandidateProfile: CandidateProfilePolicy{
-			TargetLocations:  []string{"Your target city"},
-			CommuteLocations: []string{"Your commute area"},
+			TargetLocations:  []string{},
+			CommuteLocations: []string{},
 			Languages:        []string{"English"},
-			DesiredFields:    []string{"Marketing", "Business Development", "Operations", "Administration", "Strategy", "HR"},
-			Seniority:        []string{"Entry", "Junior", "Intern", "Graduate", "Trainee", "Assistant"},
+			DesiredFields:    []string{},
+			Seniority:        []string{},
 		},
 		App: AppPolicy{
 			CronSchedule: "0 */1 * * *",
 			JobLocations: []string{},
 		},
 		Filters: FilterPolicy{
-			UnwantedLocations: []string{
-				"EMEA", "DACH", "Switzerland (Remote)", "Europe", "EU",
-			},
-			UnwantedWordsInTitle: []string{
-				"Head", "Senior", "Director", "Sr.",
-			},
-			PrimaryLanguage:    "english",
-			DetectionLanguages: []string{"english", "german", "french"},
-			RedFlagLanguageKeywords: []string{
-				"deutsch erforderlich", "german required", "german fluency", "fluent german",
-				"muttersprache deutsch", "german native", "deutschkenntnisse",
-				"flieBend deutsch", "fluent in german", "german language skills",
-				"deutsch als muttersprache", "german c1", "german c2", "deutsch c1", "deutsch c2",
-				"deutsche sprachkenntnisse", "verhandlungssicher deutsch", "german proficiency",
-			},
-			NonPrimaryLanguageKeywords: []string{
-				"stellenausschreibung", "arbeitsplatz", "bewerbung", "lebenslauf",
-				"anstellung", "mitarbeiter", "unternehmen", "gesellschaft",
-				"verantwortung", "aufgaben", "anforderungen", "qualifikation",
-				"berufserfahrung", "abschluss", "studium", "ausbildung",
-			},
-			PrimaryLanguageIndicators: []string{
-				"english", "international", "multicultural", "global", "worldwide",
-				"european", "eu", "remote", "hybrid", "flexible", "agile",
-				"you will", "we are", "join our", "opportunity", "experience",
-				"skills", "requirements", "responsibilities", "benefits",
-			},
+			UnwantedLocations:    []string{},
+			UnwantedWordsInTitle: []string{},
+			PrimaryLanguage:      "english",
+			DetectionLanguages:   []string{"english"},
+			// Language red-flag keywords are user- and language-specific
+			// (e.g. an English speaker in a German region rejecting
+			// "german required"). They are empty by default and populated
+			// from the candidate's languages during setup.
+			RedFlagLanguageKeywords:        []string{},
+			NonPrimaryLanguageKeywords:     []string{},
+			PrimaryLanguageIndicators:      []string{},
 			NonPrimaryKeywordMinCount:      2,
 			NonPrimaryDominanceThreshold:   0.60,
 			NonPrimaryDominanceRatio:       1.50,
@@ -213,12 +204,16 @@ func defaultPolicy() Policy {
 			MinTextLengthForLanguageDetect: 8,
 		},
 		Evaluation: EvaluationPolicy{
-			InitialPromptTemplate: `Rate job 0-10 for candidate targeting entry-level roles in configured locations.
+			InitialPromptTemplate: `Rate this job 0-10 for how well it fits the candidate below.
 
-GOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR
-BAD FIELDS: Engineering, Data Science, Finance, Legal, Medical
-GOOD LEVEL: Entry, Junior, Intern, Graduate, Trainee, Assistant
-BAD LEVEL: Senior, Lead, Director, 5+ years
+CANDIDATE WANTS
+- Fields/roles: {{DESIRED_FIELDS}}
+- Seniority: {{SENIORITY}}
+- Locations: {{TARGET_LOCATIONS}}
+- Speaks: {{LANGUAGES}}
+
+Score HIGH only when BOTH the field and the seniority match what the candidate wants.
+Score 0-2 when the seniority is out of range — an internship/working-student role, or a senior/lead/head/director/executive role when the candidate wants junior/mid — or a different field, or a language the candidate does not speak.
 
 Job: "{{POSITION}}" at {{COMPANY}} ({{LOCATION}})
 
@@ -226,9 +221,14 @@ Respond JSON only:
 {"score": X, "recommend": true/false, "reasons": ["brief reason"]}`,
 			FinalPromptTemplate: `CV vs Job match analysis (0-10).
 
-RED FLAGS (score=0): Required language that does not match candidate profile
-MATCH: Skills, experience level (0-2yrs), configured target locations
-SKILLS: Marketing, Business Dev, Operations, Admin, Strategy, HR
+CANDIDATE PROFILE
+- Fields/roles: {{DESIRED_FIELDS}}
+- Seniority: {{SENIORITY}}
+- Locations: {{TARGET_LOCATIONS}}
+- Speaks: {{LANGUAGES}}
+
+RED FLAG (score 0): the job requires a language the candidate does not speak, or is far outside the candidate's field/level.
+MATCH on: skills and experience shown in the CV, seniority, and location fit.
 
 CV:
 {{CV}}
@@ -238,17 +238,22 @@ Description: {{JOB_DESCRIPTION}}
 
 JSON only:
 {"finalScore": X, "reasons": ["key reason"]}`,
-			BatchPromptTemplate: `Rate jobs 0-10 for candidate targeting entry-level roles in configured locations.
+			BatchPromptTemplate: `Rate each job 0-10 for how well it fits the candidate below.
 
-GOOD FIELDS: Marketing, Business Dev, Operations, Admin, Strategy, HR
-BAD FIELDS: Engineering, Data Science, Finance, Legal, Medical
-GOOD LEVEL: Entry, Junior, Intern, Graduate, Trainee, Assistant
-BAD LEVEL: Senior, Lead, Director, 5+ years
+CANDIDATE WANTS
+- Fields/roles: {{DESIRED_FIELDS}}
+- Seniority: {{SENIORITY}}
+- Locations: {{TARGET_LOCATIONS}}
+- Speaks: {{LANGUAGES}}
+
+Score HIGH only when BOTH field and seniority match. Score 0-2 when the seniority is out of range (an internship/working-student role, or a senior/lead/head/director/executive role when the candidate wants junior/mid), a different field, or a language the candidate does not speak.
 
 {{JOBS}}
 Respond with JSON array:
 [{"jobId": 1, "score": X, "recommend": true/false, "reasons": ["brief reason"]}, ...]`,
-			ValidationPromptTemplate: `Validate job recommendation. Check for: wrong field, seniority, German requirements, skill mismatch.
+			ValidationPromptTemplate: `Validate this job recommendation. Check for mismatches in field, seniority, a required language the candidate does not speak, or a skills mismatch.
+
+Candidate fields: {{DESIRED_FIELDS}}; seniority: {{SENIORITY}}; speaks: {{LANGUAGES}}.
 
 CV: {{CV}}
 
@@ -263,10 +268,10 @@ JSON only: {"valid": true/false, "reason": "brief"}`,
 				Validation: 256,
 			},
 			CVPromptTruncation: CVPromptCfg{
-				MaxLength:         2000,
-				HeadLength:        1500,
-				TailLength:        500,
-				ValidationMaxSize: 1000,
+				MaxLength:         8000,
+				HeadLength:        6000,
+				TailLength:        2000,
+				ValidationMaxSize: 2500,
 			},
 		},
 		Pipeline: PipelinePolicy{
@@ -277,13 +282,11 @@ JSON only: {"valid": true/false, "reason": "brief"}`,
 			RejectEmptyDescriptions:      true,
 			RejectPlaceholderDescription: true,
 			RedFlagPhrases: []string{
-				"german required", "fluency in german", "fluent german", "deutsch erforderlich",
-				"job description not available", "not available", "german is required",
-				"german language requirement", "german as a requirement", "german as primary language",
+				"job description not available", "not available",
 			},
 		},
 		Notification: NotificationPolicy{
-			MinFinalScore:              0,
+			MinFinalScore:              7,
 			EmailSubjectTemplate:       "Job Alert: {{COUNT}} New Recommended Jobs Found!",
 			HeaderTitle:                "New Job Recommendations",
 			HeaderSubtitle:             "Your personalized job matches are ready!",
