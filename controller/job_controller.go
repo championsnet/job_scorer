@@ -580,6 +580,7 @@ func (jc *JobController) fetchJobsFromAllLocations() ([]*models.Job, error) {
 				Location:        location,
 				Keyword:         keyword,
 				DateSincePosted: jc.config.Policy.Scraper.DateSincePosted,
+				JobType:         jc.config.Policy.Scraper.JobType,
 				Limit:           perKeyword,
 			}
 			jobs, err := jc.scraper.Query(options)

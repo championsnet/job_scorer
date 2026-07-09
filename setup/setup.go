@@ -138,6 +138,7 @@ func (h *Handler) readExistingValues() map[string]interface{} {
 	out["schedule"] = p.App.CronSchedule
 	out["languageFilterEnabled"] = p.Filters.LanguageFilterEnabled
 	out["dateSincePosted"] = p.Scraper.DateSincePosted
+	out["jobType"] = p.Scraper.JobType
 	out["cvPath"] = p.CV.Path
 	out["model"] = strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
 	out["minScore"] = p.Notification.MinFinalScore
@@ -478,6 +479,7 @@ type savePayload struct {
 	OnlyMyLang    bool        `json:"onlyMyLanguage"`
 	Schedule      string      `json:"schedule"`
 	DatePosted    string      `json:"dateSincePosted"`
+	JobType       string      `json:"jobType"`
 	CVPath        string      `json:"cvPath"`
 	RunOnStartup  bool        `json:"runOnStartup"`
 	MaxJobs       int         `json:"maxJobs"`
@@ -579,6 +581,7 @@ func (h *Handler) writeConfigJSON(p savePayload) error {
 	if d := strings.TrimSpace(p.DatePosted); d != "" {
 		policy.Scraper.DateSincePosted = d
 	}
+	policy.Scraper.JobType = strings.TrimSpace(p.JobType) // "" = any
 	policy.CV.Path = strings.TrimSpace(p.CVPath)
 
 	// Only recommend / email jobs scoring at least this (out of 10).

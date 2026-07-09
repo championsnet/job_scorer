@@ -206,6 +206,16 @@
             <option value="past month">Past month</option>
           </select>
         </div>
+        <div>
+          <label>Job type</label>
+          <select id="jobType">
+            <option value="">Any</option>
+            <option value="full-time">Full-time only</option>
+            <option value="part-time">Part-time only</option>
+            <option value="contract">Contract</option>
+            <option value="internship">Internship</option>
+          </select>
+        </div>
       </div>
       <div class="row" style="margin-top:14px">
         <div>
@@ -538,7 +548,7 @@ async function save() {
     emailEnabled: document.getElementById("emailOn").checked, email: emailConfig(),
     desiredFields: state.fields, seniority: state.seniority, languages: state.languages,
     locations: state.locations, onlyMyLanguage: document.getElementById("onlyMyLang").checked,
-    schedule: val("schedule"), dateSincePosted: val("datePosted"), cvPath: state.cvPath,
+    schedule: val("schedule"), dateSincePosted: val("datePosted"), jobType: val("jobType"), cvPath: state.cvPath,
     runOnStartup: document.getElementById("runOnStartup").checked,
     maxJobs: Number(val("maxJobs")) || 50,
     minScore: Number(val("minScore")),
@@ -605,6 +615,7 @@ function prefill(v) {
   renderLocations();
   if (v.schedule) setSelect("schedule", v.schedule);
   if (v.dateSincePosted) setSelect("datePosted", v.dateSincePosted);
+  if (v.jobType !== undefined) setSelect("jobType", v.jobType);
   if (v.maxJobs) document.getElementById("maxJobs").value = v.maxJobs;
   if (v.minScore !== undefined && v.minScore !== null) document.getElementById("minScore").value = v.minScore;
   document.getElementById("onlyMyLang").checked = !!v.languageFilterEnabled;

@@ -121,7 +121,9 @@ type CVPolicy struct {
 }
 
 type ScraperPolicy struct {
-	DateSincePosted            string   `json:"dateSincePosted"`
+	DateSincePosted string `json:"dateSincePosted"`
+	JobType         string `json:"jobType"` // "", full-time, part-time, contract, internship, temporary
+
 	PaginationBatchSize        int      `json:"paginationBatchSize"`
 	MaxConsecutiveErrors       int      `json:"maxConsecutiveErrors"`
 	MaxRequestRetries          int      `json:"maxRequestRetries"`
@@ -266,10 +268,10 @@ JSON only: {"valid": true/false, "reason": "brief"}`,
 				Validation: 256,
 			},
 			CVPromptTruncation: CVPromptCfg{
-				MaxLength:         2000,
-				HeadLength:        1500,
-				TailLength:        500,
-				ValidationMaxSize: 1000,
+				MaxLength:         8000,
+				HeadLength:        6000,
+				TailLength:        2000,
+				ValidationMaxSize: 2500,
 			},
 		},
 		Pipeline: PipelinePolicy{
